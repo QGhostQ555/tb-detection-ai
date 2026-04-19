@@ -2,3 +2,8 @@
 
 Proyecto de detección de tuberculosis pulmonar en radiografías de tórax usando EfficientNet.
 
+## Ejecución
+
+terminal de visual studio
+1. cd src
+2. python train.py
