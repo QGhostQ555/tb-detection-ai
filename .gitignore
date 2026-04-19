@@ -1,0 +1,16 @@
+# Entorno virtual
+venv/
+
+# Dataset
+data/
+data_original/
+
+# Modelos
+models/*.pth
+
+# Python
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
