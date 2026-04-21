@@ -1,6 +1,8 @@
-tensorflow
+torch
+torchvision
+torch-directml
 numpy
-pandas
-matplotlib
 scikit-learn
+matplotlib
+pandas
 opencv-python

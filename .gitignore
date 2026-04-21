@@ -4,9 +4,23 @@ venv/
 # Dataset
 data/
 data_original/
+data_external/
+data1/
+data2/
+data_prepared/
+data_prepared_mixed/
+data_prepared_mixed_v2/
+data_prepared_mixed_v3/
+data_prepared_mixed_val2/
 
 # Modelos
 models/*.pth
+models/*.pt
+models/*.json
+models/multi_seed/
+models/**/*.pth
+models/**/*.pt
+models/**/*.json
 
 # Python
 __pycache__/
