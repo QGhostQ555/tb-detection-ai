@@ -40,6 +40,8 @@ Se pueden activar desde `train.py` con `--enhancement-mode`:
 - `clahe_gamma`: CLAHE + corrección gamma.
 - `clahe_unsharp`: CLAHE + unsharp masking para resaltar estructuras.
 
+https://www.kaggle.com/code/zeeshanshaik75/tb-2class-image-enhancement-techniques
+
 Parámetros relacionados:
 - `--clahe-clip-limit`
 - `--clahe-tile-grid`
