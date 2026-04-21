@@ -1,4 +1,4 @@
-# Clasificacion de Tuberculosis Pulmonar en Radiografias de Torax (EfficientNet-B4)
+# Clasificación de Tuberculosis Pulmonar en Radiografías de Tórax (EfficientNet-B4)
 
 Proyecto de clasificacion binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4.
 
