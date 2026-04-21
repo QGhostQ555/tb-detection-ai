@@ -8,7 +8,7 @@ Este proyecto está desarrollado en **Python** y usa un pipeline de **Deep Learn
 
 ### Stack principal
 
-- **Python 3.x**
+- **Python 3.10**
 - **PyTorch (`torch`)**: framework principal para entrenamiento e inferencia.
 - **Torchvision (`torchvision`)**: modelos preentrenados y transformaciones de imagen.
 - **EfficientNet-B4**: arquitectura base de clasificación (Transfer Learning).
