@@ -49,7 +49,7 @@ Parámetros relacionados:
 - `--unsharp-sigma`
 - `--unsharp-amount`
 
-## Tecnología de Entrenamiento (Confiabilidad y Robustez)
+## Tecnología de Entrenamiento
 
 El entrenamiento está diseñado para mejorar generalización y confiabilidad clínica:
 
@@ -119,7 +119,7 @@ Si necesitas exactamente los conteos antiguos de test:
 python src/split_dataset.py --target data_prepared_mixed --val-ratio 0.15 --test-ratio 0.45 --external-holdout-ratio 0.901 --external-val-ratio 0.15 --seed 42
 ```
 
-## 2) Entrenar una corrida (confiable y estricta)
+## 2) Entrenar una corrida 
 
 ```bash
 python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 8 --img-size 380 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy who_tpp --val2-weight 0.5
@@ -129,12 +129,6 @@ Para aplicar tecnicas de enhancement (similar a notebooks de Kaggle de TB):
 
 ```bash
 python src/train.py --data-dir data_prepared_mixed --epochs 28 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy strict --enhancement-mode clahe_unsharp --clahe-clip-limit 2.0 --clahe-tile-grid 8 --unsharp-sigma 1.0 --unsharp-amount 1.0
-```
-
-Para RX5600XT (DirectML):
-
-```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy strict --val2-weight 0.5 --fast-amd --num-workers 0
 ```
 
 Politicas de umbral:
@@ -153,7 +147,7 @@ Enhancement disponibles:
 - Modelo: `models/efficientnet_b4_tb_best.pt`
 - Metricas: `models/training_metrics.json`
   
-### Dataset
+## Dataset
 https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset/data
 https://openi.nlm.nih.gov/imgs/collections/ChinaSet_AllFiles.zip
 
