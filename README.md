@@ -150,6 +150,10 @@ Enhancement disponibles:
 
 - Modelo: `models/efficientnet_b4_tb_best.pt`
 - Metricas: `models/training_metrics.json`
+  
+### Dataset
+https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset/data
+https://openi.nlm.nih.gov/imgs/collections/ChinaSet_AllFiles.zip
 
 ## Nota
 
