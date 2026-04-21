@@ -12,7 +12,7 @@ Este proyecto está desarrollado en **Python** y usa un pipeline de **Deep Learn
 - **PyTorch (`torch`)**: framework principal para entrenamiento e inferencia.
 - **Torchvision (`torchvision`)**: modelos preentrenados y transformaciones de imagen.
 - **EfficientNet-B4**: arquitectura base de clasificación (Transfer Learning).
-- **Torch-DirectML (`torch-directml`)**: aceleración en GPU AMD (ej. RX5600XT en Windows).
+- **Torch-DirectML (`torch-directml`)**: aceleración en GPU AMD.
 - **NumPy**: operaciones numéricas.
 - **Scikit-learn (`scikit-learn`)**: métricas de evaluación (AUC, F1, matriz de confusión, etc.).
 - **OpenCV (`opencv-python`)**: técnicas de mejora de imagen para radiografías.
