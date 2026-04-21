@@ -2,6 +2,85 @@
 
 Proyecto de clasificacion binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4.
 
+## Tecnologías Utilizadas
+
+Este proyecto está desarrollado en **Python** y usa un pipeline de **Deep Learning + procesamiento de imágenes médicas** para clasificar radiografías de tórax en dos clases: `NORMAL` y `TB`.
+
+### Stack principal
+
+- **Python 3.x**
+- **PyTorch (`torch`)**: framework principal para entrenamiento e inferencia.
+- **Torchvision (`torchvision`)**: modelos preentrenados y transformaciones de imagen.
+- **EfficientNet-B4**: arquitectura base de clasificación (Transfer Learning).
+- **Torch-DirectML (`torch-directml`)**: aceleración en GPU AMD (ej. RX5600XT en Windows).
+- **NumPy**: operaciones numéricas.
+- **Scikit-learn (`scikit-learn`)**: métricas de evaluación (AUC, F1, matriz de confusión, etc.).
+- **OpenCV (`opencv-python`)**: técnicas de mejora de imagen para radiografías.
+- **PIL/Pillow**: lectura y manipulación de imágenes en el pipeline.
+- **JSON**: almacenamiento de métricas y resultados del entrenamiento.
+
+## Tecnología Aplicada a Imágenes (Radiografías CXR)
+
+El proyecto incluye un flujo específico para imágenes médicas de tórax:
+
+- Redimensionamiento de imagen a resolución configurable (`--img-size`).
+- Conversión de imagen a escala de grises y posterior adaptación a 3 canales (RGB) para modelos preentrenados.
+- Normalización con estadísticas de ImageNet para compatibilidad con EfficientNet-B4.
+- Aumentación de datos (data augmentation) controlada:
+  - rotación leve (`--rotation-deg`)
+  - flip horizontal configurable (`--hflip-prob`)
+  - ajustes suaves de brillo/contraste para robustez
+
+### Técnicas de enhancement disponibles
+
+Se pueden activar desde `train.py` con `--enhancement-mode`:
+
+- `none`: sin mejora adicional.
+- `clahe`: mejora de contraste local con CLAHE.
+- `clahe_gamma`: CLAHE + corrección gamma.
+- `clahe_unsharp`: CLAHE + unsharp masking para resaltar estructuras.
+
+Parámetros relacionados:
+- `--clahe-clip-limit`
+- `--clahe-tile-grid`
+- `--gamma`
+- `--unsharp-sigma`
+- `--unsharp-amount`
+
+## Tecnología de Entrenamiento (Confiabilidad y Robustez)
+
+El entrenamiento está diseñado para mejorar generalización y confiabilidad clínica:
+
+- **Transfer Learning** con EfficientNet-B4.
+- Entrenamiento en 2 fases:
+  - fase 1: congelación de backbone + entrenamiento de cabeza clasificadora
+  - fase 2: fine-tuning parcial de capas finales
+- **Balanceo de clases** con `WeightedRandomSampler`.
+- Función de pérdida para clasificación multiclase: `CrossEntropyLoss`.
+- Scheduler de learning rate: `ReduceLROnPlateau`.
+- Early stopping por métrica de validación.
+- Soporte de validación externa (`val_2`) para controlar *domain shift*.
+- Selección de umbral configurable:
+  - `who_tpp`
+  - `strict`
+  - `balanced`
+
+## Métricas de Evaluación
+
+El proyecto reporta métricas clínicas y de ML en validación/test:
+
+- AUC
+- Sensibilidad (Recall para TB)
+- Especificidad
+- F1-score
+- Balanced Accuracy
+- Matriz de confusión
+- Reporte de clasificación por clase
+
+Además, guarda resultados en:
+- `models/efficientnet_b4_tb_best.pt` (modelo)
+- `models/training_metrics.json` (métricas)
+
 ## Estructura de datos
 
 - `data1/`
