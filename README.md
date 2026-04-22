@@ -1,4 +1,4 @@
-# Clasificación de Tuberculosis Pulmonar en Radiografías de Tórax (EfficientNet-B4)
+# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Profundas Preentrenadas
 
 Proyecto de clasificación binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4.
 
