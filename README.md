@@ -1,4 +1,4 @@
-# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Profundas Preentrenadas
+﻿# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Profundas Preentrenadas
 
 Proyecto de clasificación binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4.
 
@@ -61,7 +61,7 @@ El entrenamiento está diseñado para mejorar generalización y confiabilidad cl
 - Función de pérdida para clasificación multiclase: `CrossEntropyLoss`.
 - Scheduler de learning rate: `ReduceLROnPlateau`.
 - Early stopping por métrica de validación.
-- Soporte de validación externa (`val_2`) para controlar *domain shift*.
+- Soporte de validación externa (`val_1`) para controlar *domain shift*.
 - Selección de umbral configurable:
   - `who_tpp`
   - `strict`
@@ -92,6 +92,26 @@ Además, guarda resultados en:
   - `NORMAL/`
   - `TB/`
 
+## ¿Qué hace cada archivo en `src/`?
+
+- `src/train.py`
+  - Entrena el clasificador TB vs NORMAL con EfficientNet-B4.
+  - Aplica enhancement y segmentación pulmonar heurística opcional.
+  - Calcula umbral final (`who_tpp`, `strict`, `balanced`).
+  - Evalúa en test interno/externo.
+  - Guarda modelo y métricas.
+  - Puede generar figura Score-CAM comparativa con `--make-cam-grid`.
+
+- `src/generate_cam_grid.py`
+  - Genera la grilla de explicabilidad (Score-CAM) **sin reentrenar**.
+  - Carga un `.pt` ya entrenado y una imagen CXR nueva.
+  - Produce comparación visual de activaciones para distintas técnicas de enhancement.
+
+- `src/split_dataset.py`
+  - Prepara el dataset mezclando `data1` y `data2`.
+  - Crea `train`, `val`, `val_1`, `test_1`, `test_2`.
+  - Permite configurar proporciones para validación interna/externa y holdout externo.
+
 ## Instalar dependencias
 
 ```bash
@@ -107,9 +127,9 @@ python src/split_dataset.py --target data_prepared_mixed --val-ratio 0.15 --test
 ```
 
 Esto genera:
-- `data_prepared_mixed/train/` (mezcla de `data1` + `data2`, excepto `val_2` y `test_2`)
+- `data_prepared_mixed/train/` (mezcla de `data1` + `data2`, excepto `val_1` y `test_2`)
 - `data_prepared_mixed/val/` (validacion desde `data1`)
-- `data_prepared_mixed/val_2/` (validacion desde `data2`)
+- `data_prepared_mixed/val_1/` (validacion desde `data2`)
 - `data_prepared_mixed/test_1/` (test interno desde `data1`)
 - `data_prepared_mixed/test_2/` (test externo holdout desde `data2`)
 
@@ -119,28 +139,29 @@ Si necesitas exactamente los conteos antiguos de test:
 python src/split_dataset.py --target data_prepared_mixed --val-ratio 0.15 --test-ratio 0.45 --external-holdout-ratio 0.901 --external-val-ratio 0.15 --seed 42
 ```
 
-## 2) Entrenar una corrida 
+## 2) Entrenamiento y contenido de la salida `.pt`
+
+Entrenamiento recomendado (incluye generación de grilla Score-CAM al final):
 
 ```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 8 --img-size 380 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy who_tpp --val2-weight 0.5
+python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 8 --img-size 380 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy who_tpp --enhancement-mode clahe_gamma --lung-segmentation-mode heuristic --make-cam-grid
 ```
 
-Para aplicar tecnicas de enhancement (similar a notebooks de Kaggle de TB):
-
-```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy strict --enhancement-mode clahe_unsharp --clahe-clip-limit 2.0 --clahe-tile-grid 8 --unsharp-sigma 1.0 --unsharp-amount 1.0
-```
-
-Politicas de umbral:
+Políticas de umbral:
 - `who_tpp`: intenta cumplir sensibilidad minima + especificidad minima (recomendado para tamizaje)
 - `strict`: prioriza mayor especificidad manteniendo sensibilidad minima
 - `balanced`: prioriza balanced accuracy
 
-Enhancement disponibles:
-- `none`
-- `clahe`
-- `clahe_gamma`
-- `clahe_unsharp`
+El archivo `models/efficientnet_b4_tb_best.pt` ya guarda estas claves para reproducibilidad:
+- `model_state_dict`: pesos de la red EfficientNet-B4 entrenada.
+- `class_to_idx_train`: mapeo de clases usado en entrenamiento.
+- `tb_index_train`: índice exacto de la clase `TB`.
+- `img_size`: tamaño de entrada usado.
+- `threshold`: umbral final calibrado.
+- `mean` y `std`: normalización aplicada en inferencia.
+- `enhancement_mode`: técnica de enhancement usada al entrenar.
+- `lung_segmentation_mode`: modo de segmentación pulmonar (`none` o `heuristic`).
+- `lung_segmentation_outside_scale`: intensidad de atenuación fuera del pulmón.
 
 ## Salidas
 

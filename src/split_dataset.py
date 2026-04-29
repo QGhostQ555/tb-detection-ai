@@ -98,7 +98,7 @@ def ensure_dirs(target: Path, class_names: Sequence[str], clean: bool) -> None:
         os.chmod(path, stat.S_IWRITE)
         func(path)
 
-    split_names = ["train", "val", "val_2", "test_1", "test_2"]
+    split_names = ["train", "val", "val_1", "test_1", "test_2"]
     if clean and target.exists():
         for split in split_names + ["test", "test_internal", "test_external"]:
             split_path = target / split
@@ -171,7 +171,7 @@ def main() -> None:
         e_files, e_labels, args.external_holdout_ratio, args.seed
     )
     if args.external_val_ratio > 0:
-        e_train_x, e_val2_x, e_train_y, e_val2_y = train_test_split(
+        e_train_x, e_val1_x, e_train_y, e_val1_y = train_test_split(
             e_keep_x,
             e_keep_y,
             test_size=args.external_val_ratio,
@@ -179,26 +179,26 @@ def main() -> None:
             random_state=args.seed,
         )
     else:
-        e_train_x, e_val2_x, e_train_y, e_val2_y = e_keep_x, [], e_keep_y, []
+        e_train_x, e_val1_x, e_train_y, e_val1_y = e_keep_x, [], e_keep_y, []
 
     ensure_dirs(args.target, class_names, clean=args.clean)
     copy_files(o_train_x, o_train_y, "train", args.target, class_names, "d1")
     copy_files(e_train_x, e_train_y, "train", args.target, class_names, "d2")
     copy_files(o_val_x, o_val_y, "val", args.target, class_names, "d1")
-    copy_files(e_val2_x, e_val2_y, "val_2", args.target, class_names, "d2")
+    copy_files(e_val1_x, e_val1_y, "val_1", args.target, class_names, "d2")
     copy_files(o_test_x, o_test_y, "test_1", args.target, class_names, "d1")
     copy_files(e_hold_x, e_hold_y, "test_2", args.target, class_names, "d2")
 
     print(f"Split completado en: {args.target}")
     print("\nResumen:")
-    for split in ["train", "val", "val_2", "test_1", "test_2"]:
+    for split in ["train", "val", "val_1", "test_1", "test_2"]:
         c = count_split(args.target, split, class_names)
         print(f"- {split}: " + ", ".join([f"{k}={v}" for k, v in c.items()]))
 
     print("\nNota:")
-    print("- train mezcla data1 + data2 (excepto val_2 y test_2 de data2)")
+    print("- train mezcla data1 + data2 (excepto val_1 y test_2 de data2)")
     print("- val proviene de data1")
-    print("- val_2 proviene de data2 para calibracion de dominio")
+    print("- val_1 proviene de data2 para calibracion de dominio")
     print("- test_1 proviene de data1")
     print("- test_2 proviene de data2")
 
