@@ -61,7 +61,7 @@ El entrenamiento está diseñado para mejorar generalización y confiabilidad cl
 - Función de pérdida para clasificación multiclase: `CrossEntropyLoss`.
 - Scheduler de learning rate: `ReduceLROnPlateau`.
 - Early stopping por métrica de validación.
-- Soporte de validación externa (`val_1`) para controlar *domain shift*.
+- Soporte de validación externa (`val_2`) para controlar *domain shift*.
 - Selección de umbral configurable:
   - `who_tpp`
   - `strict`
@@ -109,7 +109,7 @@ Además, guarda resultados en:
 
 - `src/split_dataset.py`
   - Prepara el dataset mezclando `data1` y `data2`.
-  - Crea `train`, `val`, `val_1`, `test_1`, `test_2`.
+  - Crea `train`, `val_1`, `val_2`, `test_1`, `test_2`.
   - Permite configurar proporciones para validación interna/externa y holdout externo.
 
 ## Instalar dependencias
@@ -127,9 +127,9 @@ python src/split_dataset.py --target data_prepared_mixed --val-ratio 0.15 --test
 ```
 
 Esto genera:
-- `data_prepared_mixed/train/` (mezcla de `data1` + `data2`, excepto `val_1` y `test_2`)
-- `data_prepared_mixed/val/` (validacion desde `data1`)
-- `data_prepared_mixed/val_1/` (validacion desde `data2`)
+- `data_prepared_mixed/train/` (mezcla de `data1` + `data2`, excepto `val_2` y `test_2`)
+- `data_prepared_mixed/val_1/` (validacion desde `data1`)
+- `data_prepared_mixed/val_2/` (validacion desde `data2`)
 - `data_prepared_mixed/test_1/` (test interno desde `data1`)
 - `data_prepared_mixed/test_2/` (test externo holdout desde `data2`)
 

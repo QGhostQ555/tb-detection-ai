@@ -790,7 +790,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rotation-deg", type=float, default=5.0)
     parser.add_argument("--test-internal-subdir", type=str, default="test_1")
     parser.add_argument("--test-external-subdir", type=str, default="test_2")
-    parser.add_argument("--val-external-subdir", type=str, default="val_1")
+    parser.add_argument("--val-external-subdir", type=str, default="val_2")
     parser.add_argument("--val2-weight", type=float, default=0.5)
     # Segmentación
     parser.add_argument("--lung-segmentation-mode", type=str, default="none",
@@ -835,9 +835,10 @@ def main() -> None:
 
     # Directorios
     train_dir = os.path.join(args.data_dir, "train")
-    val_dir = os.path.join(args.data_dir, "val")
+    val_dir = os.path.join(args.data_dir, "val_1")
+    legacy_val_dir = os.path.join(args.data_dir, "val")
     val_external_dir = os.path.join(args.data_dir, args.val_external_subdir)
-    legacy_val_external_dir = os.path.join(args.data_dir, "val_2")
+    legacy_val_external_dir = os.path.join(args.data_dir, "val_1")
     test_internal_dir = os.path.join(args.data_dir, args.test_internal_subdir)
     test_dir = (
         test_internal_dir if os.path.isdir(test_internal_dir)
@@ -846,6 +847,10 @@ def main() -> None:
         else os.path.join(args.data_dir, "test")
     )
     test_external_dir = os.path.join(args.data_dir, args.test_external_subdir)
+
+    if not os.path.isdir(val_dir) and os.path.isdir(legacy_val_dir):
+        val_dir = legacy_val_dir
+        print(f"Usando validacion interna legacy: {legacy_val_dir}")
 
     for p in [train_dir, val_dir, test_dir]:
         if not os.path.isdir(p):
@@ -911,7 +916,11 @@ def main() -> None:
     val_external_dataset = None
     if os.path.isdir(val_external_dir) and os.listdir(val_external_dir):
         val_external_dataset = datasets.ImageFolder(val_external_dir, transform=eval_transform)
-    elif os.path.isdir(legacy_val_external_dir) and os.listdir(legacy_val_external_dir):
+    elif (
+        os.path.abspath(legacy_val_external_dir) != os.path.abspath(val_dir)
+        and os.path.isdir(legacy_val_external_dir)
+        and os.listdir(legacy_val_external_dir)
+    ):
         val_external_dataset = datasets.ImageFolder(legacy_val_external_dir, transform=eval_transform)
         print(f"Usando validacion externa legacy: {legacy_val_external_dir}")
     external_dataset = None
