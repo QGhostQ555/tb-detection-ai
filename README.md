@@ -225,7 +225,11 @@ Salida:
 - `models/lung_attention_unet_best.pt`
 - `models/lung_attention_unet_best_metrics.json`
 
-Nota: no se recomienda entrenar U-Net con `--img-size 1024` en DirectML por memoria GPU. Usa `320` o `512`.
+En DirectML por memoria GPU. Usa `320` o `512`.
+
+Referencia de segmentación pulmonar:
+
+https://www.kaggle.com/code/iamtapendu/attention-u-net-lungs-segmentation-classification
 
 ## 3) Entrenamiento y contenido de la salida `.pt`
 
@@ -291,15 +295,9 @@ python src/generate_cam_grid.py --model-path models/efficientnet_b4_tb_best.pt -
 - Métricas clasificador: `models/training_metrics.json`
 - Explicabilidad: `models/tb_enhancement_cam_grid.png`
 
-## Dataset
+## Dataset 
 
-https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset/data
-
-https://openi.nlm.nih.gov/imgs/collections/ChinaSet_AllFiles.zip
-
-Referencia de segmentación pulmonar:
-
-https://www.kaggle.com/code/iamtapendu/attention-u-net-lungs-segmentation-classification
+https://www.kaggle.com/datasets/kmader/pulmonary-chest-xray-abnormalities/data
 
 ## Nota
 
