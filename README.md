@@ -1,6 +1,6 @@
-﻿# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Profundas Preentrenadas
+# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Profundas Preentrenadas
 
-Proyecto de clasificación binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4.
+Proyecto de clasificación binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4 y segmentación pulmonar con U-Net/Attention U-Net.
 
 ## Tecnologías Utilizadas
 
@@ -10,42 +10,59 @@ Este proyecto está desarrollado en **Python** y usa un pipeline de **Deep Learn
 
 - **Python 3.10**
 - **PyTorch (`torch`)**: framework principal para entrenamiento e inferencia.
-- **Torchvision (`torchvision`)**: modelos preentrenados y transformaciones de imagen.
-- **EfficientNet-B4**: arquitectura base de clasificación (Transfer Learning).
+- **Torchvision (`torchvision`)**: modelos preentrenados, transformaciones de imagen y `ImageFolder`.
+- **EfficientNet-B4**: arquitectura base recomendada para clasificación.
+- **DenseNet169**: backbone alternativo disponible.
+- **U-Net / Attention U-Net**: segmentación pulmonar previa a la clasificación.
 - **Torch-DirectML (`torch-directml`)**: aceleración en GPU AMD.
 - **NumPy**: operaciones numéricas.
 - **Scikit-learn (`scikit-learn`)**: métricas de evaluación (AUC, F1, matriz de confusión, etc.).
-- **OpenCV (`opencv-python`)**: técnicas de mejora de imagen para radiografías.
-- **PIL/Pillow**: lectura y manipulación de imágenes en el pipeline.
-- **JSON**: almacenamiento de métricas y resultados del entrenamiento.
+- **OpenCV (`opencv-python`)**: técnicas de mejora de imagen, máscaras y procesamiento CXR.
+- **Matplotlib**: generación de grillas Score-CAM.
+- **PIL/Pillow**: lectura y manipulación de imágenes.
+- **JSON**: almacenamiento de métricas y resultados.
 
 ## Tecnología Aplicada a Imágenes (Radiografías CXR)
 
 El proyecto incluye un flujo específico para imágenes médicas de tórax:
 
-- Redimensionamiento de imagen a resolución configurable (`--img-size`).
+- Redimensionamiento de imagen a resolución configurable (`--img-size`, por defecto `320` en `train.py`).
 - Conversión de imagen a escala de grises y posterior adaptación a 3 canales (RGB) para modelos preentrenados.
-- Normalización con estadísticas de ImageNet para compatibilidad con EfficientNet-B4.
-- Aumentación de datos (data augmentation) controlada:
+- Normalización con estadísticas de ImageNet.
+- Segmentación pulmonar antes de clasificar:
+  - `attention_unet` por defecto.
+  - `unet` opcional.
+  - `heuristic` como respaldo.
+  - `none` para desactivar.
+- Aumentación de datos controlada:
   - rotación leve (`--rotation-deg`)
   - flip horizontal configurable (`--hflip-prob`)
-  - ajustes suaves de brillo/contraste para robustez
+  - `RandomResizedCrop`
+  - ajustes suaves de brillo/contraste
+- Filtro de collages con `FilteredImageFolder` salvo que se use `--allow-collage-image`.
 
 ### Técnicas de enhancement disponibles
 
 Se pueden activar desde `train.py` con `--enhancement-mode`:
 
 - `none`: sin mejora adicional.
+- `histeq`: ecualización de histograma.
 - `clahe`: mejora de contraste local con CLAHE.
-- `clahe_gamma`: CLAHE + corrección gamma.
-- `clahe_unsharp`: CLAHE + unsharp masking para resaltar estructuras.
+- `gamma`: corrección gamma.
+- `complement`: complemento/inversión de intensidad.
+- `bcet`: Balance Contrast Enhancement Technique.
+- `clahe_gamma`: CLAHE + corrección gamma (por defecto).
+- `clahe_unsharp`: CLAHE + unsharp masking.
+- `tricanal`: representación RGB con variantes de mejora.
 
+Referencia de técnicas de enhancement:
 https://www.kaggle.com/code/zeeshanshaik75/tb-2class-image-enhancement-techniques
 
 Parámetros relacionados:
 - `--clahe-clip-limit`
 - `--clahe-tile-grid`
 - `--gamma`
+- `--bcet-target-mean`
 - `--unsharp-sigma`
 - `--unsharp-amount`
 
@@ -53,19 +70,24 @@ Parámetros relacionados:
 
 El entrenamiento está diseñado para mejorar generalización y confiabilidad clínica:
 
-- **Transfer Learning** con EfficientNet-B4.
+- **Transfer Learning** con backbone preentrenado.
+- Backbone por defecto: `efficientnet_b4`.
+- Backbones soportados:
+  - `efficientnet_b4`
+  - `densenet169`
 - Entrenamiento en 2 fases:
-  - fase 1: congelación de backbone + entrenamiento de cabeza clasificadora
+  - fase 1: congelación del extractor de características + entrenamiento de cabeza clasificadora
   - fase 2: fine-tuning parcial de capas finales
 - **Balanceo de clases** con `WeightedRandomSampler`.
-- Función de pérdida para clasificación multiclase: `CrossEntropyLoss`.
+- Función de pérdida: `CrossEntropyLoss`.
 - Scheduler de learning rate: `ReduceLROnPlateau`.
 - Early stopping por métrica de validación.
-- Soporte de validación externa (`val_2`) para controlar *domain shift*.
+- Soporte de evaluación externa opcional con `--enable-external-eval`.
 - Selección de umbral configurable:
   - `who_tpp`
   - `strict`
-  - `balanced`
+  - `balanced` (por defecto actual)
+- Score-CAM opcional al final con `--make-cam-grid`.
 
 ## Métricas de Evaluación
 
@@ -74,16 +96,20 @@ El proyecto reporta métricas clínicas y de ML en validación/test:
 - AUC
 - Sensibilidad (Recall para TB)
 - Especificidad
+- Precisión
 - F1-score
 - Balanced Accuracy
 - Matriz de confusión
 - Reporte de clasificación por clase
 
 Además, guarda resultados en:
-- `models/efficientnet_b4_tb_best.pt` (modelo)
+- `models/efficientnet_b4_tb_best.pt` (modelo clasificador)
 - `models/training_metrics.json` (métricas)
+- `models/tb_enhancement_cam_grid.png` (Score-CAM si se activa)
 
 ## Estructura de datos
+
+Dataset de clasificación:
 
 - `data1/`
   - `NORMAL/`
@@ -92,25 +118,63 @@ Además, guarda resultados en:
   - `NORMAL/`
   - `TB/`
 
+Dataset de segmentación pulmonar:
+
+- `segmentacion/`
+  - `CXR_png/`
+  - `ManualMask/`
+    - `leftMask/`
+    - `rightMask/`
+
+Dataset preparado por `split_dataset.py`:
+
+- `data_prepared_mixed/`
+  - `train/`
+    - `NORMAL/`
+    - `TB/`
+  - `val_1/`
+    - `NORMAL/`
+    - `TB/`
+  - `test_1/`
+    - `NORMAL/`
+    - `TB/`
+
 ## ¿Qué hace cada archivo en `src/`?
-
-- `src/train.py`
-  - Entrena el clasificador TB vs NORMAL con EfficientNet-B4.
-  - Aplica enhancement y segmentación pulmonar heurística opcional.
-  - Calcula umbral final (`who_tpp`, `strict`, `balanced`).
-  - Evalúa en test interno/externo.
-  - Guarda modelo y métricas.
-  - Puede generar figura Score-CAM comparativa con `--make-cam-grid`.
-
-- `src/generate_cam_grid.py`
-  - Genera la grilla de explicabilidad (Score-CAM) **sin reentrenar**.
-  - Carga un `.pt` ya entrenado y una imagen CXR nueva.
-  - Produce comparación visual de activaciones para distintas técnicas de enhancement.
 
 - `src/split_dataset.py`
   - Prepara el dataset mezclando `data1` y `data2`.
-  - Crea `train`, `val_1`, `val_2`, `test_1`, `test_2`.
-  - Permite configurar proporciones para validación interna/externa y holdout externo.
+  - Balancea `NORMAL` y `TB` usando el mínimo disponible o `--target-per-class`.
+  - Crea `train`, `val_1`, `test_1`.
+  - Estratifica por dataset de origen para mantener proporciones estables.
+  - Permite `--balance-domain`, `--deduplicate` y `--quality-filter`.
+  - Copia archivos con nombres estables que incluyen dominio (`d1`, `d2`).
+
+- `src/train_lung_unet.py`
+  - Entrena el segmentador pulmonar.
+  - Usa `segmentacion/CXR_png` como imágenes.
+  - Combina `ManualMask/leftMask` + `ManualMask/rightMask` como máscara pulmonar.
+  - Entrena `attention_unet` por defecto o `unet`.
+  - Usa pérdida combinada Dice + BCE.
+  - Reporta Dice e IoU.
+  - Guarda `models/lung_attention_unet_best.pt`.
+
+- `src/train.py`
+  - Entrena el clasificador `TB` vs `NORMAL`.
+  - Aplica enhancement.
+  - Aplica segmentación pulmonar con U-Net/Attention U-Net antes de clasificar.
+  - Si falta checkpoint U-Net, usa segmentación heurística como respaldo.
+  - Soporta `efficientnet_b4` y `densenet169`.
+  - Calcula umbral final (`who_tpp`, `strict`, `balanced`).
+  - Evalúa en test interno y externo opcional.
+  - Guarda modelo y métricas.
+  - Puede generar figura Score-CAM con `--make-cam-grid`.
+
+- `src/generate_cam_grid.py`
+  - Genera grilla Score-CAM **sin reentrenar**.
+  - Carga un `.pt` ya entrenado y una imagen CXR nueva.
+  - Reutiliza `generate_cam_grid_figure` desde `train.py`.
+  - Aplica segmentación pulmonar configurada.
+  - Produce comparación visual de activaciones para distintas técnicas de enhancement.
 
 ## Instalar dependencias
 
@@ -118,60 +182,110 @@ Además, guarda resultados en:
 pip install -r requirements.txt
 ```
 
-## 1) Generar split (mezcla de dominios + calibracion externa)
+## 1) Generar split balanceado
 
-Recomendado para confiabilidad (deja mas datos de `data2` para entrenamiento):
+Recomendado para confiabilidad:
 
 ```bash
-python src/split_dataset.py --target data_prepared_mixed --val-ratio 0.15 --test-ratio 0.45 --external-holdout-ratio 0.30 --external-val-ratio 0.15 --seed 42
+python src/split_dataset.py --target data_prepared_mixed --clean --val-ratio 0.15 --test-ratio 0.15 --seed 42
 ```
 
 Esto genera:
-- `data_prepared_mixed/train/` (mezcla de `data1` + `data2`, excepto `val_2` y `test_2`)
-- `data_prepared_mixed/val_1/` (validacion desde `data1`)
-- `data_prepared_mixed/val_2/` (validacion desde `data2`)
-- `data_prepared_mixed/test_1/` (test interno desde `data1`)
-- `data_prepared_mixed/test_2/` (test externo holdout desde `data2`)
+- `data_prepared_mixed/train/`
+- `data_prepared_mixed/val_1/`
+- `data_prepared_mixed/test_1/`
 
-Si necesitas exactamente los conteos antiguos de test:
+Con los datos actuales, el script usa automáticamente el mínimo disponible entre clases. Ejemplo:
+
+- `train`: `NORMAL=276`, `TB=276`
+- `val_1`: `NORMAL=59`, `TB=59`
+- `test_1`: `NORMAL=59`, `TB=59`
+
+Opciones útiles:
 
 ```bash
-python src/split_dataset.py --target data_prepared_mixed --val-ratio 0.15 --test-ratio 0.45 --external-holdout-ratio 0.901 --external-val-ratio 0.15 --seed 42
+python src/split_dataset.py --target data_prepared_mixed --clean --target-per-class 300 --val-ratio 0.15 --test-ratio 0.15 --seed 42
 ```
 
-## 2) Entrenamiento y contenido de la salida `.pt`
+```bash
+python src/split_dataset.py --target data_prepared_mixed --clean --balance-domain --seed 42
+```
 
-Entrenamiento recomendado (incluye generación de grilla Score-CAM al final):
+`--balance-domain` fuerza igualdad entre `data1` y `data2`, pero puede usar menos imágenes porque `data1` tiene menos muestras.
+
+## 2) Entrenar segmentador pulmonar U-Net
+
+Primero entrena el Attention U-Net con las máscaras manuales:
 
 ```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 8 --img-size 380 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy who_tpp --enhancement-mode clahe_gamma --lung-segmentation-mode heuristic --make-cam-grid
+python src/train_lung_unet.py --segmentation-dir segmentacion --model-dir models --output-name lung_attention_unet_best.pt --architecture attention_unet --img-size 320 --epochs 40 --batch-size 4
+```
+
+Salida:
+- `models/lung_attention_unet_best.pt`
+- `models/lung_attention_unet_best_metrics.json`
+
+Nota: no se recomienda entrenar U-Net con `--img-size 1024` en DirectML por memoria GPU. Usa `320` o `512`.
+
+## 3) Entrenamiento y contenido de la salida `.pt`
+
+Entrenamiento recomendado (incluye segmentación pulmonar + generación de Score-CAM):
+
+```bash
+python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone efficientnet_b4 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy balanced --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
+```
+
+Si quieres subir resolución:
+
+```bash
+python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 4 --img-size 512 --backbone efficientnet_b4 --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
 ```
 
 Políticas de umbral:
-- `who_tpp`: intenta cumplir sensibilidad minima + especificidad minima (recomendado para tamizaje)
-- `strict`: prioriza mayor especificidad manteniendo sensibilidad minima
-- `balanced`: prioriza balanced accuracy
+- `who_tpp`: intenta cumplir sensibilidad mínima + especificidad mínima.
+- `strict`: prioriza mayor especificidad manteniendo sensibilidad mínima.
+- `balanced`: prioriza balanced accuracy.
 
-El archivo `models/efficientnet_b4_tb_best.pt` ya guarda estas claves para reproducibilidad:
-- `model_state_dict`: pesos de la red EfficientNet-B4 entrenada.
-- `class_to_idx_train`: mapeo de clases usado en entrenamiento.
-- `tb_index_train`: índice exacto de la clase `TB`.
+El archivo `models/efficientnet_b4_tb_best.pt` guarda claves para reproducibilidad:
+- `model_state_dict`: pesos del clasificador entrenado.
+- `class_to_idx_train`: mapeo de clases usado.
+- `tb_index_train`: índice exacto de clase `TB`.
 - `img_size`: tamaño de entrada usado.
 - `threshold`: umbral final calibrado.
-- `mean` y `std`: normalización aplicada en inferencia.
-- `enhancement_mode`: técnica de enhancement usada al entrenar.
-- `lung_segmentation_mode`: modo de segmentación pulmonar (`none` o `heuristic`).
-- `lung_segmentation_outside_scale`: intensidad de atenuación fuera del pulmón.
+- `mean` y `std`: normalización aplicada.
+- `enhancement_mode`: técnica de enhancement.
+- `lung_segmentation_mode`: modo de segmentación pulmonar (`none`, `heuristic`, `unet`, `attention_unet`).
+- `lung_segmentation_outside_scale`: atenuación fuera del pulmón.
+- `lung_unet_checkpoint`: checkpoint del segmentador.
+- `backbone`: arquitectura usada.
+- `apical_weight`: ponderación apical para Score-CAM.
+
+## 4) Generar Score-CAM sin reentrenar
+
+```bash
+python src/generate_cam_grid.py --model-path models/efficientnet_b4_tb_best.pt --image-path ruta/a/radiografia.png --output-path models/tb_enhancement_cam_grid.png --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt
+```
 
 ## Salidas
 
-- Modelo: `models/efficientnet_b4_tb_best.pt`
-- Metricas: `models/training_metrics.json`
-  
+- Segmentador: `models/lung_attention_unet_best.pt`
+- Métricas segmentador: `models/lung_attention_unet_best_metrics.json`
+- Clasificador: `models/efficientnet_b4_tb_best.pt`
+- Métricas clasificador: `models/training_metrics.json`
+- Explicabilidad: `models/tb_enhancement_cam_grid.png`
+
 ## Dataset
+
 https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset/data
+
 https://openi.nlm.nih.gov/imgs/collections/ChinaSet_AllFiles.zip
+
+Referencia de segmentación pulmonar:
+
+https://www.kaggle.com/code/iamtapendu/attention-u-net-lungs-segmentation-classification
 
 ## Nota
 
 Si Windows bloquea archivos al limpiar carpetas, ejecuta el split sin `--clean` o usa otro `--target`.
+
+Si aparece error de memoria en DirectML, baja `--img-size` o `--batch-size`.

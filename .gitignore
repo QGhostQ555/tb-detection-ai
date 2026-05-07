@@ -1,6 +1,11 @@
 # Entorno virtual
 venv/
 
+# Instalacion local / herramientas
+skills-lock.json
+install.sh
+备份/
+
 # Dataset
 data/
 data_original/

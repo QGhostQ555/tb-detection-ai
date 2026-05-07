@@ -11,12 +11,26 @@ from train import generate_cam_grid_figure
 def parse_args() -> argparse.Namespace:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     default_model_path = os.path.abspath(os.path.join(base_dir, "..", "models", "efficientnet_b4_tb_best.pt"))
+    if not os.path.isfile(default_model_path):
+        for rel_path in [
+            os.path.join("models", "modelo final", "efficientnet_b4_tb_best.pt"),
+            os.path.join("models", "modelo bien", "efficientnet_b4_tb_best.pt"),
+            os.path.join("models", "1.4", "efficientnet_b4_tb_best.pt"),
+        ]:
+            candidate = os.path.abspath(os.path.join(base_dir, "..", rel_path))
+            if os.path.isfile(candidate):
+                default_model_path = candidate
+                break
     default_output_path = os.path.abspath(os.path.join(base_dir, "..", "models", "tb_enhancement_cam_grid.png"))
+    default_lung_unet = os.path.abspath(
+        os.path.join(base_dir, "..", "models", "lung_attention_unet_best.pt")
+    )
     parser = argparse.ArgumentParser(description="Genera grilla Score-CAM sin reentrenar el modelo.")
     parser.add_argument("--model-path", type=str, default=default_model_path, help="Checkpoint .pt entrenado.")
     parser.add_argument("--image-path", type=str, required=True, help="Radiografia CXR individual.")
     parser.add_argument("--output-path", type=str, default=default_output_path)
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--img-size", type=int, default=380)
     parser.add_argument("--clahe-clip-limit", type=float, default=2.0)
     parser.add_argument("--clahe-tile-grid", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=1.1)
@@ -36,10 +50,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lung-segmentation-mode",
         type=str,
-        default="none",
-        choices=["none", "heuristic"],
-        help="Modo de mascara pulmonar para fila segmentada del CAM.",
+        default="attention_unet",
+        choices=["none", "heuristic", "unet", "attention_unet"],
+        help="Modo de mascara pulmonar aplicada antes del CAM.",
     )
+    parser.add_argument("--lung-unet-checkpoint", type=str, default=default_lung_unet)
     parser.add_argument("--allow-collage-image", action="store_true")
     return parser.parse_args()
 
@@ -65,7 +80,8 @@ def main() -> None:
     tb_idx = int(ckpt.get("tb_index_train", class_to_idx.get("TB", 1)))
     mean = ckpt.get("mean", [0.485, 0.456, 0.406])
     std = ckpt.get("std", [0.229, 0.224, 0.225])
-    img_size = int(ckpt.get("img_size", 380))
+    img_size = args.img_size
+    lung_unet_checkpoint = ckpt.get("lung_unet_checkpoint", args.lung_unet_checkpoint)
 
     cam_args = SimpleNamespace(
         img_size=img_size,
@@ -86,6 +102,8 @@ def main() -> None:
         cam_alpha=args.cam_alpha,
         segment_outside_scale=args.segment_outside_scale,
         lung_segmentation_mode=args.lung_segmentation_mode,
+        lung_segmentation_outside_scale=ckpt.get("lung_segmentation_outside_scale", args.segment_outside_scale),
+        lung_unet_checkpoint=lung_unet_checkpoint,
         allow_collage_image=args.allow_collage_image,
     )
 
