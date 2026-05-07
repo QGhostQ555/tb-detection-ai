@@ -276,9 +276,7 @@ python src/generate_cam_grid.py --model-path models/efficientnet_b4_tb_best.pt -
 
 ## Dataset
 
-https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset/data
-
-https://openi.nlm.nih.gov/imgs/collections/ChinaSet_AllFiles.zip
+https://www.kaggle.com/datasets/kmader/pulmonary-chest-xray-abnormalities/data
 
 Referencia de segmentación pulmonar:
 
