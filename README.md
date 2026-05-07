@@ -235,6 +235,23 @@ Entrenamiento recomendado (incluye segmentación pulmonar + generación de Score
 python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone efficientnet_b4 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy balanced --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
 ```
 
+`src/train.py` permite elegir arquitectura con `--backbone`:
+
+- `efficientnet_b4`: opción recomendada por defecto.
+- `densenet169`: alternativa preentrenada para comparar rendimiento.
+
+Comando usando EfficientNet-B4:
+
+```bash
+python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone efficientnet_b4 --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
+```
+
+Comando usando DenseNet169:
+
+```bash
+python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone densenet169 --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
+```
+
 Si quieres subir resolución:
 
 ```bash
@@ -276,7 +293,9 @@ python src/generate_cam_grid.py --model-path models/efficientnet_b4_tb_best.pt -
 
 ## Dataset
 
-https://www.kaggle.com/datasets/kmader/pulmonary-chest-xray-abnormalities/data
+https://www.kaggle.com/datasets/tawsifurrahman/tuberculosis-tb-chest-xray-dataset/data
+
+https://openi.nlm.nih.gov/imgs/collections/ChinaSet_AllFiles.zip
 
 Referencia de segmentación pulmonar:
 
