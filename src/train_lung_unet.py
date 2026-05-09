@@ -37,10 +37,27 @@ def list_segmentation_pairs(segmentation_dir: str) -> List[Tuple[str, str, str]]
 
 
 class LungMaskDataset(Dataset):
-    def __init__(self, pairs: List[Tuple[str, str, str]], img_size: int, augment: bool):
+    def __init__(
+        self,
+        pairs: List[Tuple[str, str, str]],
+        img_size: int,
+        augment: bool,
+        clahe_clip_limit: float = 2.0,
+        gamma: float = 1.1,
+    ):
         self.pairs = pairs
         self.img_size = img_size
         self.augment = augment
+        self.clahe = cv2.createCLAHE(
+            clipLimit=max(0.1, float(clahe_clip_limit)),
+            tileGridSize=(8, 8),
+        )
+        self.gamma = max(0.1, float(gamma))
+        inv = 1.0 / self.gamma
+        self.gamma_lut = np.array(
+            [(i / 255.0) ** inv * 255.0 for i in range(256)],
+            dtype=np.uint8,
+        )
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -55,24 +72,40 @@ class LungMaskDataset(Dataset):
 
         mask = cv2.bitwise_or((left > 0).astype(np.uint8) * 255,
                               (right > 0).astype(np.uint8) * 255)
+        # Close small holes in manual masks after merge.
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
         img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
         mask = cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+
+        # CLAHE + gamma before augmentation to stabilize contrast across studies.
+        img = self.clahe.apply(img)
+        img = cv2.LUT(img, self.gamma_lut)
 
         if self.augment:
             if random.random() < 0.5:
                 img = cv2.flip(img, 1)
                 mask = cv2.flip(mask, 1)
-            angle = random.uniform(-5.0, 5.0)
+            angle = random.uniform(-8.0, 8.0)
+            scale = random.uniform(0.95, 1.05)
+            tx = random.uniform(-0.03, 0.03) * self.img_size
+            ty = random.uniform(-0.03, 0.03) * self.img_size
             center = (self.img_size / 2.0, self.img_size / 2.0)
-            mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+            mat = cv2.getRotationMatrix2D(center, angle, scale)
+            mat[0, 2] += tx
+            mat[1, 2] += ty
             img = cv2.warpAffine(
                 img, mat, (self.img_size, self.img_size),
-                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101,
             )
             mask = cv2.warpAffine(
                 mask, mat, (self.img_size, self.img_size),
                 flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
             )
+            if random.random() < 0.30:
+                alpha = random.uniform(0.90, 1.12)
+                beta = random.uniform(-10.0, 10.0)
+                img = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
 
         img = img.astype(np.float32) / 255.0
         mask = (mask > 0).astype(np.float32)
@@ -131,6 +164,33 @@ def evaluate(model, loader, device, criterion, threshold: float) -> Dict[str, fl
     }
 
 
+def find_best_threshold(model, loader, device, thresholds: np.ndarray) -> float:
+    model.eval()
+    all_probs: List[np.ndarray] = []
+    all_targets: List[np.ndarray] = []
+    with torch.no_grad():
+        for images, masks in loader:
+            images = images.to(device)
+            probs = torch.sigmoid(model(images)).cpu().numpy()
+            all_probs.append(probs)
+            all_targets.append(masks.numpy())
+    if not all_probs:
+        return 0.50
+    probs = np.concatenate(all_probs, axis=0)
+    targets = (np.concatenate(all_targets, axis=0) >= 0.5).astype(np.float32)
+    best_thr = 0.50
+    best_dice = -1.0
+    for thr in thresholds:
+        preds = (probs >= thr).astype(np.float32)
+        inter = np.sum(preds * targets, axis=(1, 2, 3))
+        denom = np.sum(preds + targets, axis=(1, 2, 3))
+        dice = np.mean((2.0 * inter + 1.0) / (denom + 1.0))
+        if float(dice) > best_dice:
+            best_dice = float(dice)
+            best_thr = float(thr)
+    return best_thr
+
+
 def parse_args() -> argparse.Namespace:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     default_segmentation_dir = os.path.abspath(os.path.join(base_dir, "..", "segmentacion"))
@@ -152,6 +212,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--clahe-clip-limit", type=float, default=2.0)
+    parser.add_argument("--gamma", type=float, default=1.1)
+    parser.add_argument("--auto-threshold", action="store_true",
+                        help="Buscar umbral de mascara optimo en validacion por Dice.")
+    parser.add_argument("--min-threshold", type=float, default=0.35)
+    parser.add_argument("--max-threshold", type=float, default=0.70)
+    parser.add_argument("--threshold-steps", type=int, default=15)
     return parser.parse_args()
 
 
@@ -167,8 +234,14 @@ def main() -> None:
     train_len = len(pairs) - val_len
     train_pairs, val_pairs = random_split(pairs, [train_len, val_len], generator=generator)
 
-    train_ds = LungMaskDataset(list(train_pairs), args.img_size, augment=True)
-    val_ds = LungMaskDataset(list(val_pairs), args.img_size, augment=False)
+    train_ds = LungMaskDataset(
+        list(train_pairs), args.img_size, augment=True,
+        clahe_clip_limit=args.clahe_clip_limit, gamma=args.gamma,
+    )
+    val_ds = LungMaskDataset(
+        list(val_pairs), args.img_size, augment=False,
+        clahe_clip_limit=args.clahe_clip_limit, gamma=args.gamma,
+    )
 
     loader_kwargs = {"num_workers": args.num_workers, "pin_memory": torch.cuda.is_available()}
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
@@ -186,8 +259,15 @@ def main() -> None:
         optimizer, mode="max", factor=0.5, patience=3,
     )
 
+    if args.auto_threshold:
+        if args.threshold_steps < 3:
+            raise ValueError("--threshold-steps debe ser >= 3")
+        if not (0.05 <= args.min_threshold < args.max_threshold <= 0.95):
+            raise ValueError("Rango de threshold invalido.")
+
     best_dice = -1.0
     best_state = None
+    best_threshold = float(args.threshold)
     wait = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -201,15 +281,20 @@ def main() -> None:
             optimizer.step()
             train_loss += loss.item()
         train_loss /= max(1, len(train_loader))
-        val_metrics = evaluate(model, val_loader, device, criterion, args.threshold)
+        eval_threshold = float(args.threshold)
+        if args.auto_threshold:
+            threshold_grid = np.linspace(args.min_threshold, args.max_threshold, args.threshold_steps)
+            eval_threshold = find_best_threshold(model, val_loader, device, threshold_grid)
+        val_metrics = evaluate(model, val_loader, device, criterion, eval_threshold)
         scheduler.step(val_metrics["dice"])
         print(
             f"Epoch {epoch:02d}/{args.epochs} | train_loss={train_loss:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} | dice={val_metrics['dice']:.4f} | "
-            f"iou={val_metrics['iou']:.4f}"
+            f"iou={val_metrics['iou']:.4f} | thr={eval_threshold:.3f}"
         )
         if val_metrics["dice"] > best_dice:
             best_dice = val_metrics["dice"]
+            best_threshold = eval_threshold
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
             wait = 0
         else:
@@ -228,9 +313,11 @@ def main() -> None:
             "model_state_dict": best_state,
             "architecture": args.architecture,
             "img_size": args.img_size,
-            "threshold": args.threshold,
+            "threshold": float(best_threshold),
             "base_channels": args.base_channels,
             "segmentation_dir": args.segmentation_dir,
+            "clahe_clip_limit": args.clahe_clip_limit,
+            "gamma": args.gamma,
         },
         model_path,
     )
@@ -243,10 +330,13 @@ def main() -> None:
                 "best_val_dice": best_dice,
                 "architecture": args.architecture,
                 "img_size": args.img_size,
-                "threshold": args.threshold,
+                "threshold": float(best_threshold),
+                "threshold_auto": bool(args.auto_threshold),
                 "train_samples": len(train_ds),
                 "val_samples": len(val_ds),
                 "segmentation_dir": args.segmentation_dir,
+                "clahe_clip_limit": args.clahe_clip_limit,
+                "gamma": args.gamma,
             },
             f,
             indent=2,
