@@ -1,4 +1,4 @@
-# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Profundas Preentrenadas
+# Detección Automatizada de Tuberculosis en Imágenes de Rayos-X Torácico Usando Fine-Tuning de Redes Neuronales Profundas
 
 Proyecto de clasificación binaria (`TB` vs `NORMAL`) usando transfer learning con EfficientNet-B4 y segmentación pulmonar con U-Net/Attention U-Net.
 
