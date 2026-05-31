@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import hashlib
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -44,7 +45,23 @@ def select_device() -> Tuple[torch.device, str]:
 # ---------------------------------------------------------------------------
 class CLAHEEnhancer:
     def __init__(self, clip_limit: float = 2.0, tile_grid_size: int = 8):
-        self.clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_grid_size, tile_grid_size))
+        self.clip_limit = float(clip_limit)
+        self.tile_grid_size = int(tile_grid_size)
+        self.clahe = cv2.createCLAHE(
+            clipLimit=self.clip_limit,
+            tileGridSize=(self.tile_grid_size, self.tile_grid_size),
+        )
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # cv2.CLAHE no es picklable en multiprocessing (Windows/Python 3.14).
+        state["clahe"] = None
+        return state
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.clahe = cv2.createCLAHE(
+            clipLimit=self.clip_limit,
+            tileGridSize=(self.tile_grid_size, self.tile_grid_size),
+        )
     def __call__(self, img: Image.Image) -> Image.Image:
         arr = np.array(img.convert("L"), dtype=np.uint8)
         return Image.fromarray(self.clahe.apply(arr), mode="L")
@@ -122,6 +139,13 @@ class EnhanceCompose:
         for step in self.steps:
             img = step(img)
         return img
+
+
+class ToRGB:
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if img.mode == "RGB":
+            return img
+        return img.convert("RGB")
 
 def build_enhancer(mode: str, clahe_clip_limit: float, clahe_tile_grid: int,
                    gamma: float, bcet_target_mean: float = 110.0,
@@ -335,13 +359,17 @@ def _clean_lung_mask(mask: np.ndarray, fallback_gray: np.ndarray) -> np.ndarray:
     return filled
 
 class NeuralLungSegmentationEnhancer:
-    def __init__(self, checkpoint_path: str, outside_scale=0.08, fallback="heuristic"):
+    def __init__(self, checkpoint_path: str, outside_scale=0.08, fallback="heuristic",
+                 use_cache: bool = True, cache_max_items: int = 2500):
         self.checkpoint_path = checkpoint_path
         self.outside_scale = float(np.clip(outside_scale, 0.0, 1.0))
         self.fallback = fallback
         self.model = None
         self.input_size = 320
         self.threshold = 0.5
+        self.use_cache = bool(use_cache)
+        self.cache_max_items = max(0, int(cache_max_items))
+        self._mask_cache = {}
     def _load(self):
         if self.model is not None: return
         if not self.checkpoint_path or not os.path.isfile(self.checkpoint_path):
@@ -359,17 +387,30 @@ class NeuralLungSegmentationEnhancer:
         model.eval()
         self.model = model
     def predict_mask(self, gray: np.ndarray) -> np.ndarray:
+        cache_key = None
+        if self.use_cache and self.cache_max_items > 0:
+            cache_key = hashlib.sha1(gray.tobytes()).hexdigest()
+            cached = self._mask_cache.get(cache_key)
+            if cached is not None:
+                return cached
         self._load()
-        if self.model is None: return _estimate_lung_mask(gray)
-        h, w = gray.shape
-        small = cv2.resize(gray, (self.input_size, self.input_size),
-                           interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-        x = torch.from_numpy(small).unsqueeze(0).unsqueeze(0)
-        with torch.no_grad():
-            prob = torch.sigmoid(self.model(x))[0, 0].cpu().numpy()
-        mask = (prob >= self.threshold).astype(np.uint8) * 255
-        mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-        return _clean_lung_mask(mask, gray)
+        if self.model is None:
+            mask = _estimate_lung_mask(gray)
+        else:
+            h, w = gray.shape
+            small = cv2.resize(gray, (self.input_size, self.input_size),
+                               interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+            x = torch.from_numpy(small).unsqueeze(0).unsqueeze(0)
+            with torch.no_grad():
+                prob = torch.sigmoid(self.model(x))[0, 0].cpu().numpy()
+            mask = (prob >= self.threshold).astype(np.uint8) * 255
+            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            mask = _clean_lung_mask(mask, gray)
+        if cache_key is not None:
+            if len(self._mask_cache) >= self.cache_max_items:
+                self._mask_cache.pop(next(iter(self._mask_cache)))
+            self._mask_cache[cache_key] = mask
+        return mask
     def __call__(self, img: Image.Image) -> Image.Image:
         arr = np.array(img.convert("L"), dtype=np.uint8)
         mask = self.predict_mask(arr)
@@ -379,20 +420,35 @@ class NeuralLungSegmentationEnhancer:
         return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="L")
 
 class HeuristicLungSegmentationEnhancer:
-    def __init__(self, outside_scale=0.08):
+    def __init__(self, outside_scale=0.08, use_cache: bool = True, cache_max_items: int = 2500):
         self.outside_scale = outside_scale
+        self.use_cache = bool(use_cache)
+        self.cache_max_items = max(0, int(cache_max_items))
+        self._mask_cache = {}
     def __call__(self, img: Image.Image) -> Image.Image:
         arr = np.array(img.convert("L"), dtype=np.uint8)
-        mask = _estimate_lung_mask(arr)
+        if self.use_cache and self.cache_max_items > 0:
+            cache_key = hashlib.sha1(arr.tobytes()).hexdigest()
+            mask = self._mask_cache.get(cache_key)
+            if mask is None:
+                mask = _estimate_lung_mask(arr)
+                if len(self._mask_cache) >= self.cache_max_items:
+                    self._mask_cache.pop(next(iter(self._mask_cache)))
+                self._mask_cache[cache_key] = mask
+        else:
+            mask = _estimate_lung_mask(arr)
         mf = mask.astype(np.float32) / 255.0
         out = arr.astype(np.float32) * self.outside_scale
         out += arr.astype(np.float32) * mf * (1.0 - self.outside_scale)
         return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="L")
 
-def build_lung_segmenter(mode: str, outside_scale: float, checkpoint_path: str = ""):
+def build_lung_segmenter(mode: str, outside_scale: float, checkpoint_path: str = "",
+                         use_cache: bool = True, cache_max_items: int = 2500):
     if mode == "none": return None
-    if mode == "heuristic": return HeuristicLungSegmentationEnhancer(outside_scale)
-    if mode in ("unet", "attention_unet"): return NeuralLungSegmentationEnhancer(checkpoint_path, outside_scale)
+    if mode == "heuristic":
+        return HeuristicLungSegmentationEnhancer(outside_scale, use_cache, cache_max_items)
+    if mode in ("unet", "attention_unet"):
+        return NeuralLungSegmentationEnhancer(checkpoint_path, outside_scale, "heuristic", use_cache, cache_max_items)
     raise ValueError(f"Modo de segmentación no soportado: {mode}")
 
 # ---------------------------------------------------------------------------
@@ -606,6 +662,14 @@ def compute_binary_metrics(y_true, y_prob, threshold):
             "balanced_accuracy": float(bal_acc),
             "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)}
 
+def compute_clinical_score(metrics: Dict[str, float], min_sens: float, min_spec: float) -> float:
+    # Penaliza fuerte si no cumple piso OMS, luego prioriza F1/BalAcc/AUC.
+    sens_gap = max(0.0, min_sens - metrics["sensitivity"])
+    spec_gap = max(0.0, min_spec - metrics["specificity"])
+    penalty = 3.0 * sens_gap + 2.0 * spec_gap
+    base = 0.35 * metrics["auc"] + 0.35 * metrics["f1"] + 0.30 * metrics["balanced_accuracy"]
+    return float(base - penalty)
+
 def find_best_threshold(y_true, y_prob, min_sens, min_spec, policy):
     thresholds = np.linspace(0.01, 0.99, 99)
     all_rows = [{"threshold": float(t), **compute_binary_metrics(y_true, y_prob, t)} for t in thresholds]
@@ -627,6 +691,12 @@ def find_best_threshold(y_true, y_prob, min_sens, min_spec, policy):
             return best["threshold"], "strict: max specificity con sens mínima"
         best = max(all_rows, key=lambda x: (x["specificity"], x["balanced_accuracy"]))
         return best["threshold"], "strict fallback: max specificity"
+    elif policy == "hybrid":
+        if candidates:
+            best = max(candidates, key=lambda x: (0.5 * x["f1"] + 0.5 * x["balanced_accuracy"], x["auc"]))
+            return best["threshold"], "hybrid: OMS + max(F1,BalAcc)"
+        best = max(all_rows, key=lambda x: (0.5 * x["f1"] + 0.5 * x["balanced_accuracy"], x["auc"]))
+        return best["threshold"], "hybrid fallback: max(F1,BalAcc)"
     else:
         best = max(all_rows, key=lambda x: (x["balanced_accuracy"], x["f1"]))
         return best["threshold"], "balanced: mayor balanced accuracy"
@@ -636,7 +706,8 @@ def run_inference(model, loader, device, criterion, tb_index):
     total_loss, y_true, y_prob = 0.0, [], []
     with torch.no_grad():
         for images, labels in loader:
-            images, labels_d = images.to(device), labels.to(device)
+            images = images.to(device, non_blocking=True)
+            labels_d = labels.to(device, non_blocking=True)
             logits = model(images)
             total_loss += criterion(logits, labels_d).item()
             probs = torch.softmax(logits, dim=1)[:, tb_index].cpu().numpy()
@@ -688,10 +759,12 @@ def build_transforms(args, enhancer, lung_segmenter, mean, std, is_train: bool):
     steps = []
     if not is_tricanal:
         steps.append(transforms.Grayscale(num_output_channels=1))
-    if lung_segmenter is not None:
-        steps.append(lung_segmenter)
     if enhancer is not None:
         steps.append(enhancer)
+    # Keep preprocessing order consistent with inference:
+    # enhancement (e.g., CLAHE+Gamma) -> lung segmentation -> classification.
+    if lung_segmenter is not None:
+        steps.append(lung_segmenter)
     steps.append(transforms.Resize((args.img_size, args.img_size)))
     if is_train:
         steps.append(transforms.RandomResizedCrop(args.img_size, scale=(0.85, 1.0), ratio=(0.9,1.1)))
@@ -699,10 +772,7 @@ def build_transforms(args, enhancer, lung_segmenter, mean, std, is_train: bool):
             steps.append(transforms.RandomHorizontalFlip(p=args.hflip_prob))
         steps.append(transforms.RandomRotation(degrees=args.rotation_deg))
         steps.append(transforms.ColorJitter(brightness=0.10, contrast=0.10))
-    if not is_tricanal:
-        steps.append(transforms.Lambda(lambda x: x.convert("RGB")))
-    else:
-        steps.append(transforms.Lambda(lambda x: x.convert("RGB") if x.mode != "RGB" else x))
+    steps.append(ToRGB())
     steps.extend([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])
     return transforms.Compose(steps)
 
@@ -734,6 +804,8 @@ def parse_args():
     parser.add_argument("--data-dir", type=str, default=os.path.join(base_dir, "..", "data_prepared_mixed"))
     parser.add_argument("--external-dir", type=str, default=os.path.join(base_dir, "..", "data2"))
     parser.add_argument("--model-dir", type=str, default=os.path.join(base_dir, "..", "models"))
+    parser.add_argument("--output-name", type=str, default="",
+                        help="Nombre del checkpoint final (.pt). Si vacio, usa <backbone>_tb_best.pt")
     # Training
     parser.add_argument("--epochs", type=int, default=28)
     parser.add_argument("--batch-size", type=int, default=12)
@@ -750,7 +822,10 @@ def parse_args():
     parser.add_argument("--min-sensitivity", type=float, default=0.90)
     parser.add_argument("--min-specificity", type=float, default=0.70)
     parser.add_argument("--threshold-policy", type=str, default="balanced",
-                        choices=["who_tpp", "strict", "balanced"])
+                        choices=["who_tpp", "strict", "balanced", "hybrid"])
+    parser.add_argument("--selection-policy", type=str, default="clinical",
+                        choices=["auc", "clinical"],
+                        help="Criterio para guardar mejor checkpoint durante entrenamiento.")
     # Enhancement
     parser.add_argument("--enhancement-mode", type=str, default="clahe_gamma",
                         choices=["none","histeq","clahe","gamma","complement","bcet",
@@ -767,6 +842,9 @@ def parse_args():
     parser.add_argument("--lung-segmentation-outside-scale", type=float, default=0.08)
     parser.add_argument("--lung-unet-checkpoint", type=str,
                         default=os.path.join(base_dir, "..", "models", "lung_attention_unet_best.pt"))
+    parser.add_argument("--lung-mask-cache", action="store_true",
+                        help="Cachea mascaras pulmonares en RAM para acelerar epochs posteriores.")
+    parser.add_argument("--lung-mask-cache-max-items", type=int, default=2500)
     # Augmentation
     parser.add_argument("--hflip-prob", type=float, default=0.0)
     parser.add_argument("--rotation-deg", type=float, default=5.0)
@@ -834,6 +912,8 @@ def main():
     os.makedirs(args.model_dir, exist_ok=True)
     device, device_name = select_device()
     logging.info(f"Using device: {device_name} ({device})")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     if args.fast_amd and device_name == "DirectML":
         args.img_size = min(args.img_size, 300)
@@ -853,11 +933,19 @@ def main():
         args.lung_segmentation_mode,
         args.lung_segmentation_outside_scale,
         args.lung_unet_checkpoint,
+        use_cache=args.lung_mask_cache,
+        cache_max_items=args.lung_mask_cache_max_items,
     )
     logging.info(f"Enhancement: {args.enhancement_mode} / Segmentation: {args.lung_segmentation_mode}")
     if args.lung_segmentation_mode in ("unet", "attention_unet") and not os.path.isfile(args.lung_unet_checkpoint):
         logging.warning("U-Net checkpoint not found, falling back to heuristic segmentation.")
         lung_segmenter = HeuristicLungSegmentationEnhancer(args.lung_segmentation_outside_scale)
+    if args.num_workers > 0 and args.lung_segmentation_mode in ("unet", "attention_unet"):
+        logging.warning(
+            "num_workers>0 con segmentacion U-Net puede degradar rendimiento/estabilidad en Windows. "
+            "Forzando num_workers=0 para evitar cuelgues de multiprocessing."
+        )
+        args.num_workers = 0
 
     # Build model (nuevo)
     model, weights = build_model(args.backbone)
@@ -922,8 +1010,9 @@ def main():
 
     scaler = torch.cuda.amp.GradScaler() if args.amp and device.type == "cuda" else None
 
-    best_auc = -1.0
+    best_monitor_score = -1.0
     best_state = None
+    best_epoch = 0
     wait = 0
     head_epochs = max(1, int(args.epochs * 0.35))
 
@@ -940,7 +1029,8 @@ def main():
         model.train()
         train_loss = 0.0
         for images, labels in train_loader:
-            images, labels = images.to(device), labels.to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad()
             if scaler:
                 with torch.cuda.amp.autocast():
@@ -959,18 +1049,39 @@ def main():
         val_auc = roc_auc_score(val_true, val_prob) if len(np.unique(val_true)) > 1 else 0.0
         monitor_auc = val_auc
         val2_auc = None
+        cal_true, cal_prob = [val_true], [val_prob]
         if val_ext_loader and tb_idx_val_ext is not None:
             _, v2t, v2p = run_inference(model, val_ext_loader, device, criterion, tb_idx_val_ext)
             val2_auc = roc_auc_score(v2t, v2p) if len(np.unique(v2t)) > 1 else 0.0
             monitor_auc = (1 - args.val2_weight) * val_auc + args.val2_weight * val2_auc
+            cal_true.append(v2t)
+            cal_prob.append(v2p)
+
+        # Selección de checkpoint por score clínico o por AUC.
+        val_true_all = np.concatenate(cal_true)
+        val_prob_all = np.concatenate(cal_prob)
+        epoch_thr, _ = find_best_threshold(
+            val_true_all, val_prob_all,
+            args.min_sensitivity, args.min_specificity,
+            args.threshold_policy,
+        )
+        epoch_metrics = compute_binary_metrics(val_true_all, val_prob_all, epoch_thr)
+        clinical_score = compute_clinical_score(epoch_metrics, args.min_sensitivity, args.min_specificity)
+        monitor_score = clinical_score if args.selection_policy == "clinical" else monitor_auc
 
         scheduler.step(monitor_auc)
-        logging.info(f"Epoch {epoch:02d}/{args.epochs} | loss={train_loss:.4f} | val_auc={val_auc:.4f}"
-                     + (f" | val2_auc={val2_auc:.4f} | monitor={monitor_auc:.4f}" if val2_auc else ""))
+        logging.info(
+            f"Epoch {epoch:02d}/{args.epochs} | loss={train_loss:.4f} | val_auc={val_auc:.4f}"
+            + (f" | val2_auc={val2_auc:.4f}" if val2_auc else "")
+            + f" | thr={epoch_thr:.3f} | f1={epoch_metrics['f1']:.4f} | bal={epoch_metrics['balanced_accuracy']:.4f}"
+            + f" | sens={epoch_metrics['sensitivity']:.4f} | spec={epoch_metrics['specificity']:.4f}"
+            + f" | monitor={monitor_score:.4f}"
+        )
 
-        if monitor_auc > best_auc:
-            best_auc = monitor_auc
+        if monitor_score > best_monitor_score:
+            best_monitor_score = monitor_score
             best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            best_epoch = epoch
             wait = 0
         else:
             wait += 1
@@ -1000,8 +1111,11 @@ def main():
         "threshold": threshold, "threshold_rule": thr_note,
         "enhancement_mode": args.enhancement_mode,
         "lung_segmentation_mode": args.lung_segmentation_mode,
+        "lung_mask_cache": bool(args.lung_mask_cache),
         "backbone": args.backbone,
-        "best_monitor_auc": float(best_auc),
+        "selection_policy": args.selection_policy,
+        "best_monitor_score": float(best_monitor_score),
+        "best_epoch": int(best_epoch),
     }
 
     # Test evaluation
@@ -1016,7 +1130,8 @@ def main():
         tb_class = next(n for n, i in class_to_idx.items() if i == tb_idx_train)
         ref_img = args.cam_grid_image or _find_first_image_in_class(test_dir, tb_class)
         if ref_img and os.path.isfile(ref_img):
-            cam_out = args.cam_grid_output or os.path.join(args.model_dir, "tb_enhancement_cam_grid.png")
+            model_stem = os.path.splitext(args.output_name)[0] if args.output_name else f"{args.backbone}_tb_best"
+            cam_out = args.cam_grid_output or os.path.join(args.model_dir, f"{model_stem}_cam_grid.png")
             model.eval()
             try:
                 generate_cam_grid_figure(model, device, tb_idx_train, ref_img, cam_out, mean, std, args)
@@ -1027,7 +1142,14 @@ def main():
             logging.warning("No reference image found for Score-CAM.")
 
     # Save model and metrics
-    model_path = os.path.join(args.model_dir, "efficientnet_b4_tb_best.pt")
+    output_name = args.output_name.strip()
+    if output_name:
+        if not output_name.lower().endswith(".pt"):
+            output_name = f"{output_name}.pt"
+    else:
+        output_name = f"{args.backbone}_tb_best.pt"
+    model_stem = os.path.splitext(output_name)[0]
+    model_path = os.path.join(args.model_dir, output_name)
     torch.save({
         "model_state_dict": model.state_dict(),
         "class_to_idx_train": class_to_idx,
@@ -1042,9 +1164,10 @@ def main():
         "backbone": args.backbone,
         "apical_weight": args.apical_weight,
     }, model_path)
-    with open(os.path.join(args.model_dir, "training_metrics.json"), "w") as f:
+    metrics_path = os.path.join(args.model_dir, f"{model_stem}_training_metrics.json")
+    with open(metrics_path, "w") as f:
         json.dump(metrics_summary, f, indent=2)
-    logging.info(f"Model saved to {model_path}\nMetrics saved.")
+    logging.info(f"Model saved to {model_path}\nMetrics saved to {metrics_path}.")
 
 if __name__ == "__main__":
     main()

@@ -86,7 +86,12 @@ El entrenamiento está diseñado para mejorar generalización y confiabilidad cl
 - Selección de umbral configurable:
   - `who_tpp`
   - `strict`
-  - `balanced` (por defecto actual)
+  - `balanced`
+  - `hybrid` (OMS + mejor F1/BalAcc)
+- Selección de checkpoint configurable:
+  - `auc`
+  - `clinical` (por defecto actual)
+- Cache opcional de máscara pulmonar en RAM (`--lung-mask-cache`) para acelerar epochs.
 - Score-CAM opcional al final con `--make-cam-grid`.
 
 ## Métricas de Evaluación
@@ -103,9 +108,9 @@ El proyecto reporta métricas clínicas y de ML en validación/test:
 - Reporte de clasificación por clase
 
 Además, guarda resultados en:
-- `models/efficientnet_b4_tb_best.pt` (modelo clasificador)
-- `models/training_metrics.json` (métricas)
-- `models/tb_enhancement_cam_grid.png` (Score-CAM si se activa)
+- `models/<backbone>_tb_best.pt` (modelo clasificador)
+- `models/<backbone>_tb_best_training_metrics.json` (métricas)
+- `models/<backbone>_tb_best_cam_grid.png` (Score-CAM si se activa)
 
 ## Estructura de datos
 
@@ -122,9 +127,7 @@ Dataset de segmentación pulmonar:
 
 - `segmentacion/`
   - `CXR_png/`
-  - `ManualMask/`
-    - `leftMask/`
-    - `rightMask/`
+  - `masks/` (máscara bilateral en una sola imagen)
 
 Dataset preparado por `split_dataset.py`:
 
@@ -152,7 +155,7 @@ Dataset preparado por `split_dataset.py`:
 - `src/train_lung_unet.py`
   - Entrena el segmentador pulmonar.
   - Usa `segmentacion/CXR_png` como imágenes.
-  - Combina `ManualMask/leftMask` + `ManualMask/rightMask` como máscara pulmonar.
+  - Usa `segmentacion/mask` o `segmentacion/masks` como máscara pulmonar bilateral.
   - Entrena `attention_unet` por defecto o `unet`.
   - Usa pérdida combinada Dice + BCE.
   - Reporta Dice e IoU.
@@ -164,7 +167,9 @@ Dataset preparado por `split_dataset.py`:
   - Aplica segmentación pulmonar con U-Net/Attention U-Net antes de clasificar.
   - Si falta checkpoint U-Net, usa segmentación heurística como respaldo.
   - Soporta `efficientnet_b4` y `densenet169`.
-  - Calcula umbral final (`who_tpp`, `strict`, `balanced`).
+  - Calcula umbral final (`who_tpp`, `strict`, `balanced`, `hybrid`).
+  - Selecciona mejor checkpoint por `auc` o por score clínico (`--selection-policy clinical`).
+  - Permite cache de máscara pulmonar (`--lung-mask-cache`) para acelerar entrenamiento.
   - Evalúa en test interno y externo opcional.
   - Guarda modelo y métricas.
   - Puede generar figura Score-CAM con `--make-cam-grid`.
@@ -233,10 +238,10 @@ https://www.kaggle.com/code/iamtapendu/attention-u-net-lungs-segmentation-classi
 
 ## 3) Entrenamiento y contenido de la salida `.pt`
 
-Entrenamiento recomendado (incluye segmentación pulmonar + generación de Score-CAM):
+Entrenamiento recomendado (incluye segmentación pulmonar + selección clínica + Score-CAM):
 
 ```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone efficientnet_b4 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy balanced --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
+python src/train.py --data-dir data_prepared_mixed --epochs 60 --batch-size 8 --num-workers 0 --img-size 380 --backbone efficientnet_b4 --output-name efficientnet_b4_tb_best.pt --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --lung-mask-cache --lung-mask-cache-max-items 2500 --min-sensitivity 0.90 --min-specificity 0.70 --threshold-policy hybrid --selection-policy clinical --make-cam-grid
 ```
 
 `src/train.py` permite elegir arquitectura con `--backbone`:
@@ -247,13 +252,13 @@ python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 -
 Comando usando EfficientNet-B4:
 
 ```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone efficientnet_b4 --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
+python src/train.py --data-dir data_prepared_mixed --epochs 60 --batch-size 8 --num-workers 0 --img-size 380 --backbone efficientnet_b4 --output-name efficientnet_b4_tb_best.pt --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --lung-mask-cache --threshold-policy hybrid --selection-policy clinical --make-cam-grid
 ```
 
 Comando usando DenseNet169:
 
 ```bash
-python src/train.py --data-dir data_prepared_mixed --epochs 28 --batch-size 12 --img-size 320 --backbone densenet169 --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --make-cam-grid
+python src/train.py --data-dir data_prepared_mixed --epochs 60 --batch-size 8 --num-workers 0 --img-size 380 --backbone densenet169 --output-name densenet169_tb_best.pt --enhancement-mode clahe_gamma --lung-segmentation-mode attention_unet --lung-unet-checkpoint models/lung_attention_unet_best.pt --lung-mask-cache --threshold-policy hybrid --selection-policy clinical --make-cam-grid
 ```
 
 Si quieres subir resolución:
@@ -266,8 +271,13 @@ Políticas de umbral:
 - `who_tpp`: intenta cumplir sensibilidad mínima + especificidad mínima.
 - `strict`: prioriza mayor especificidad manteniendo sensibilidad mínima.
 - `balanced`: prioriza balanced accuracy.
+- `hybrid`: exige piso OMS y luego prioriza F1/Balanced Accuracy.
 
-El archivo `models/efficientnet_b4_tb_best.pt` guarda claves para reproducibilidad:
+Políticas de selección de checkpoint:
+- `auc`: guarda mejor por AUC.
+- `clinical`: guarda mejor por score clínico (AUC+F1+BalAcc con penalización por incumplir OMS).
+
+El archivo `models/<backbone>_tb_best.pt` guarda claves para reproducibilidad:
 - `model_state_dict`: pesos del clasificador entrenado.
 - `class_to_idx_train`: mapeo de clases usado.
 - `tb_index_train`: índice exacto de clase `TB`.
@@ -291,9 +301,9 @@ python src/generate_cam_grid.py --model-path models/efficientnet_b4_tb_best.pt -
 
 - Segmentador: `models/lung_attention_unet_best.pt`
 - Métricas segmentador: `models/lung_attention_unet_best_metrics.json`
-- Clasificador: `models/efficientnet_b4_tb_best.pt`
-- Métricas clasificador: `models/training_metrics.json`
-- Explicabilidad: `models/tb_enhancement_cam_grid.png`
+- Clasificador: `models/<backbone>_tb_best.pt`
+- Métricas clasificador: `models/<backbone>_tb_best_training_metrics.json`
+- Explicabilidad: `models/<backbone>_tb_best_cam_grid.png`
 
 ## Dataset 
 

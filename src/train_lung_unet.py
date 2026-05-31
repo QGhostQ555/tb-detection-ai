@@ -13,33 +13,55 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from train import AttentionLungUNet, LungUNet, select_device, set_seed
 
 
-def list_segmentation_pairs(segmentation_dir: str) -> List[Tuple[str, str, str]]:
+def _is_image_file(name: str) -> bool:
+    return name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"))
+
+
+def list_segmentation_pairs(segmentation_dir: str) -> List[Tuple[str, str]]:
     cxr_dir = os.path.join(segmentation_dir, "CXR_png")
-    left_dir = os.path.join(segmentation_dir, "ManualMask", "leftMask")
-    right_dir = os.path.join(segmentation_dir, "ManualMask", "rightMask")
     if not os.path.isdir(cxr_dir):
         raise FileNotFoundError(f"No existe: {cxr_dir}")
-    if not os.path.isdir(left_dir) or not os.path.isdir(right_dir):
-        raise FileNotFoundError("Faltan ManualMask/leftMask o ManualMask/rightMask.")
+    mask_dir = ""
+    for candidate in ("mask", "masks", "Mask", "Masks"):
+        path = os.path.join(segmentation_dir, candidate)
+        if os.path.isdir(path):
+            mask_dir = path
+            break
+    if not mask_dir:
+        raise FileNotFoundError(
+            f"No existe carpeta de mascaras en {segmentation_dir} (se esperaba mask o masks)."
+        )
 
-    pairs: List[Tuple[str, str, str]] = []
+    mask_by_stem: Dict[str, str] = {}
+    for name in os.listdir(mask_dir):
+        if not _is_image_file(name):
+            continue
+        mask_by_stem[os.path.splitext(name)[0].lower()] = os.path.join(mask_dir, name)
+
+    pairs: List[Tuple[str, str]] = []
     for name in sorted(os.listdir(cxr_dir)):
-        if not name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")):
+        if not _is_image_file(name):
             continue
         img_path = os.path.join(cxr_dir, name)
-        left_path = os.path.join(left_dir, name)
-        right_path = os.path.join(right_dir, name)
-        if os.path.isfile(left_path) and os.path.isfile(right_path):
-            pairs.append((img_path, left_path, right_path))
+        stem = os.path.splitext(name)[0].lower()
+        candidates = [
+            stem,
+            f"{stem}_mask",
+            f"{stem}-mask",
+            f"mask_{stem}",
+        ]
+        mask_path = next((mask_by_stem[key] for key in candidates if key in mask_by_stem), None)
+        if mask_path is not None:
+            pairs.append((img_path, mask_path))
     if not pairs:
-        raise RuntimeError("No se encontraron pares CXR + mascaras manuales.")
+        raise RuntimeError("No se encontraron pares CXR + mascara en segmentacion/mask.")
     return pairs
 
 
 class LungMaskDataset(Dataset):
     def __init__(
         self,
-        pairs: List[Tuple[str, str, str]],
+        pairs: List[Tuple[str, str]],
         img_size: int,
         augment: bool,
         clahe_clip_limit: float = 2.0,
@@ -63,16 +85,14 @@ class LungMaskDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx: int):
-        img_path, left_path, right_path = self.pairs[idx]
+        img_path, mask_path = self.pairs[idx]
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        left = cv2.imread(left_path, cv2.IMREAD_GRAYSCALE)
-        right = cv2.imread(right_path, cv2.IMREAD_GRAYSCALE)
-        if img is None or left is None or right is None:
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if img is None or mask is None:
             raise FileNotFoundError(f"No se pudo leer par de segmentacion: {img_path}")
 
-        mask = cv2.bitwise_or((left > 0).astype(np.uint8) * 255,
-                              (right > 0).astype(np.uint8) * 255)
-        # Close small holes in manual masks after merge.
+        # Cierra huecos pequenos en mascara binaria final.
+        mask = (mask > 0).astype(np.uint8) * 255
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
         img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
@@ -195,7 +215,7 @@ def parse_args() -> argparse.Namespace:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     default_segmentation_dir = os.path.abspath(os.path.join(base_dir, "..", "segmentacion"))
     default_model_dir = os.path.abspath(os.path.join(base_dir, "..", "models"))
-    parser = argparse.ArgumentParser(description="Entrena U-Net pulmonar con mascaras manuales.")
+    parser = argparse.ArgumentParser(description="Entrena U-Net pulmonar con CXR_png + mask (mascara bilateral).")
     parser.add_argument("--segmentation-dir", type=str, default=default_segmentation_dir)
     parser.add_argument("--model-dir", type=str, default=default_model_dir)
     parser.add_argument("--output-name", type=str, default="lung_attention_unet_best.pt")

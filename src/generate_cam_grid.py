@@ -85,6 +85,7 @@ def main() -> None:
 
     cam_args = SimpleNamespace(
         img_size=img_size,
+        enhancement_mode=ckpt.get("enhancement_mode", "clahe_gamma"),
         clahe_clip_limit=args.clahe_clip_limit,
         clahe_tile_grid=args.clahe_tile_grid,
         gamma=args.gamma,
