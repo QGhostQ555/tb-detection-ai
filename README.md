@@ -307,7 +307,9 @@ python src/generate_cam_grid.py --model-path models/efficientnet_b4_tb_best.pt -
 
 ## Dataset 
 
-https://www.kaggle.com/datasets/kmader/pulmonary-chest-xray-abnormalities/data
+https://www.kaggle.com/datasets/kmader/pulmonary-chest-xray-abnormalities/data (Imágenes NORMAL + TB)
+https://www.kaggle.com/datasets/vbookshelf/tbx11k-simplified (Imágenes NORMAL + TB)
+https://www.kaggle.com/datasets/nikhilpandey360/chest-xray-masks-and-labels (Entrenar Unet)
 
 ## Nota
 
