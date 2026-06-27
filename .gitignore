@@ -39,5 +39,9 @@ segmentacion/
 __pycache__/
 *.pyc
 
+# Scripts locales no publicados
+src/evaluate_yolo_cls.py
+src/generate_cam_grid.py
+
 # Sistema
 .DS_Store
