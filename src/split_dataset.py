@@ -28,7 +28,7 @@ class Sample:
 def parse_args() -> argparse.Namespace:
     base_dir = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
-        description="Construye un split balanceado NORMAL/TB con estratificacion por dataset."
+        description="Construye un split balanceado NORMAL/TB con estratificacion por dataset y opcional oversampling."
     )
     parser.add_argument("--source-dataset-1", "--source-original", dest="source_dataset_1",
                         type=Path, default=base_dir / "data1")
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
                         type=Path, default=base_dir / "data2")
     parser.add_argument("--target", type=Path, default=base_dir / "data_prepared_mixed")
     parser.add_argument("--target-per-class", type=int, default=0,
-                        help="Cantidad por clase. 0 usa el minimo disponible entre NORMAL y TB.")
+                        help="Cantidad por clase. 0 usa el mínimo disponible entre NORMAL y TB (a menos que se use --oversample).")
     parser.add_argument("--target-normal", type=int, default=0,
                         help="Cantidad NORMAL. 0 usa auto/equitativo.")
     parser.add_argument("--target-tb", type=int, default=0,
@@ -51,7 +51,8 @@ def parse_args() -> argparse.Namespace:
                         help="Elimina duplicados por hash dentro de cada clase")
     parser.add_argument("--quality-filter", action="store_true",
                         help="Activa filtros OpenCV de calidad. Por defecto se omiten para dividir rapido.")
-
+    parser.add_argument("--oversample", action="store_true",
+                        help="Realiza oversampling de la clase minoritaria para igualar el tamaño de la clase mayoritaria (balance perfecto con más imágenes).")
     parser.add_argument("--min-size", type=int, default=128, help="Resolucion minima por lado")
     parser.add_argument("--min-sharpness", type=float, default=6.0,
                         help="Varianza de Laplaciano minima")
@@ -232,6 +233,40 @@ def select_equitable_samples(
     return selected[:target_count]
 
 
+def oversample_class(samples: List[Sample], target_count: int, seed: int, balance_domain: bool) -> List[Sample]:
+    """
+    Realiza oversampling (con repetición) de las muestras disponibles hasta alcanzar target_count.
+    Si balance_domain es True, intenta mantener la proporción original de dominios.
+    """
+    if len(samples) >= target_count:
+        return select_equitable_samples(samples, target_count, seed, balance_domain)
+    # Necesitamos duplicar
+    if balance_domain:
+        by_domain = {}
+        for s in samples:
+            by_domain.setdefault(s.domain, []).append(s)
+        total = len(samples)
+        result = []
+        rnd = random.Random(seed)
+        for domain, domain_samples in by_domain.items():
+            needed = int(round(target_count * len(domain_samples) / total))
+            # Ajustar por redondeo
+            if needed < len(domain_samples):
+                result.extend(rnd.sample(domain_samples, needed))
+            else:
+                result.extend(rnd.choices(domain_samples, k=needed))
+        # Si por redondeo falta algún sample, añadir aleatoriamente de cualquier dominio
+        if len(result) < target_count:
+            remaining = target_count - len(result)
+            all_samples = samples
+            result.extend(rnd.choices(all_samples, k=remaining))
+        rnd.shuffle(result)
+        return result
+    else:
+        rnd = random.Random(seed)
+        return rnd.choices(samples, k=target_count)
+
+
 def split_one_class(samples: List[Sample], val_ratio: float, test_ratio: float, seed: int) -> Dict[str, List[Sample]]:
     if val_ratio <= 0 or test_ratio <= 0 or (val_ratio + test_ratio) >= 0.9:
         raise ValueError("Ratios invalidos: usa val_ratio/test_ratio > 0 y val+test < 0.9")
@@ -283,18 +318,28 @@ def ensure_dirs(target: Path, class_names: Sequence[str], clean: bool) -> None:
             (target / split / class_name).mkdir(parents=True, exist_ok=True)
 
 
-def build_stable_name(src: Path, domain_tag: str) -> str:
+def build_stable_name(src: Path, domain_tag: str, idx: int = 0) -> str:
+    """Si idx>0, se añade un sufijo para evitar colisiones en oversampling."""
     digest = hashlib.md5(str(src).encode("utf-8")).hexdigest()[:10]
-    return f"{domain_tag}_{digest}_{src.name}"
+    base = f"{domain_tag}_{digest}_{src.stem}"
+    if idx > 0:
+        base = f"{base}_copy{idx}"
+    return base + src.suffix
 
 
-def copy_split(samples: List[Sample], split: str, target: Path, class_name: str) -> None:
+def copy_split(samples: List[Sample], split: str, target: Path, class_name: str, copy_counter: Dict[str, int]) -> None:
+    """
+    Copia las muestras al destino. Para muestras que son duplicadas (oversampling),
+    se usa un contador para generar nombres únicos.
+    """
     for s in samples:
-        dst_name = build_stable_name(s.path, s.domain)
+        path_key = str(s.path)
+        count = copy_counter.get(path_key, 0)
+        copy_counter[path_key] = count + 1
+        dst_name = build_stable_name(s.path, s.domain, count)
         dst = target / split / class_name / dst_name
-        if dst.exists():
-            dst.unlink()
-        shutil.copy2(s.path, dst)
+        if not dst.exists():
+            shutil.copy2(s.path, dst)
 
 
 def count_split(target: Path, split: str, class_names: Sequence[str]) -> Dict[str, int]:
@@ -334,31 +379,43 @@ def main() -> None:
         "TB", args, args.source_dataset_1, args.source_dataset_2
     )
 
-    target_normal, target_tb = resolve_targets(args, len(normal_all), len(tb_all))
-    if target_normal != target_tb:
-        print("Advertencia: NORMAL y TB tendran cantidades distintas por configuracion explicita.")
+    if args.oversample:
+        max_count = max(len(normal_all), len(tb_all))
+        target_normal = max_count
+        target_tb = max_count
+        print(f"Oversampling activado: se balancearán ambas clases a {max_count} muestras.")
+    else:
+        target_normal, target_tb = resolve_targets(args, len(normal_all), len(tb_all))
 
-    selected_normal = select_equitable_samples(
-        normal_all, target_normal, seed=args.seed + 101, balance_domain=args.balance_domain
-    )
-    selected_tb = select_equitable_samples(
-        tb_all, target_tb, seed=args.seed + 202, balance_domain=args.balance_domain
-    )
+    if len(normal_all) < target_normal:
+        print(f"Oversampling de NORMAL de {len(normal_all)} a {target_normal}")
+        selected_normal = oversample_class(normal_all, target_normal, args.seed + 101, args.balance_domain)
+    else:
+        selected_normal = select_equitable_samples(normal_all, target_normal, args.seed + 101, args.balance_domain)
+
+    if len(tb_all) < target_tb:
+        print(f"Oversampling de TB de {len(tb_all)} a {target_tb}")
+        selected_tb = oversample_class(tb_all, target_tb, args.seed + 202, args.balance_domain)
+    else:
+        selected_tb = select_equitable_samples(tb_all, target_tb, args.seed + 202, args.balance_domain)
 
     n_split = split_one_class(selected_normal, args.val_ratio, args.test_ratio, args.seed)
     t_split = split_one_class(selected_tb, args.val_ratio, args.test_ratio, args.seed)
 
     ensure_dirs(args.target, CLASS_NAMES, clean=args.clean)
+
+    copy_counter = {}
+
     for split in ["train", "val_1", "test_1"]:
-        copy_split(n_split[split], split, args.target, "NORMAL")
-        copy_split(t_split[split], split, args.target, "TB")
+        copy_split(n_split[split], split, args.target, "NORMAL", copy_counter)
+        copy_split(t_split[split], split, args.target, "TB", copy_counter)
 
     print(f"Split completado en: {args.target}")
     print("\nMuestras disponibles despues de filtros:")
     print(f"- NORMAL disponibles: {len(normal_all)} | dominios={domain_counts(normal_all)}")
     print(f"- TB disponibles: {len(tb_all)} | dominios={domain_counts(tb_all)}")
 
-    print("\nSeleccion usada:")
+    print("\nSeleccion usada (despues de posible oversampling):")
     print(f"- NORMAL usadas: {len(selected_normal)} | dominios={domain_counts(selected_normal)}")
     print(f"- TB usadas: {len(selected_tb)} | dominios={domain_counts(selected_tb)}")
 
@@ -372,9 +429,11 @@ def main() -> None:
         print("- Se eliminaron duplicados por hash MD5 dentro de cada clase")
     else:
         print("- Duplicados no eliminados (activa --deduplicate si deseas filtrarlos)")
-    print("- Split balanceado por clase y estratificado por dataset")
-    print("- Usa --balance-domain si quieres forzar igualdad entre data1 y data2 dentro de cada clase")
-    print(f"- Total objetivo usado: NORMAL={target_normal}, TB={target_tb}")
+    if args.oversample:
+        print("- Se realizó oversampling de la clase minoritaria para balancear las cantidades.")
+    else:
+        print("- Split balanceado por clase (tamaño limitado por la clase minoritaria).")
+    print(f"Total objetivo usado: NORMAL={target_normal}, TB={target_tb}")
 
 
 if __name__ == "__main__":

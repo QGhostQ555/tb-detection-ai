@@ -17,15 +17,23 @@ data_prepared_mixed/
 data_prepared_mixed_v2/
 data_prepared_mixed_v3/
 data_prepared_mixed_val2/
+data_prepared_segmented/
 
 # Modelos
 models/*.pth
 models/*.pt
 models/*.json
+models/*.zip
 models/multi_seed/
 models/**/*.pth
 models/**/*.pt
 models/**/*.json
+models/**/*.zip
+
+# YOLO / experimentos generados
+runs/
+yolo*.pt
+segmentacion/
 
 # Python
 __pycache__/

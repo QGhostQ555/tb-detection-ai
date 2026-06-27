@@ -19,6 +19,7 @@ from torchvision import datasets, transforms
 from torchvision.models import (
     efficientnet_b4, EfficientNet_B4_Weights,
     densenet169, DenseNet169_Weights,
+    convnext_tiny, ConvNeXt_Tiny_Weights,
 )
 
 # ---------------------------------------------------------------------------
@@ -790,16 +791,44 @@ def build_model(backbone: str):
         model = densenet169(weights=weights)
         in_features = model.classifier.in_features
         model.classifier = nn.Linear(in_features, 2)
+    elif backbone == "convnext_tiny":
+        weights = ConvNeXt_Tiny_Weights.DEFAULT
+        model = convnext_tiny(weights=weights)
+        in_features = model.classifier[2].in_features
+        model.classifier[2] = nn.Linear(in_features, 2)
     else:
         raise ValueError(f"Backbone desconocido: {backbone}")
     return model, weights
+
+
+def get_feature_extractor(model: nn.Module) -> nn.Module:
+    if hasattr(model, "features"):
+        return model.features
+    raise ValueError("Modelo sin extractor features soportado.")
+
+
+def get_classifier_head(model: nn.Module) -> nn.Module:
+    if hasattr(model, "classifier"):
+        return model.classifier
+    raise ValueError("Modelo sin classifier soportado.")
+
+
+def unfreeze_last_feature_blocks(model: nn.Module, n_blocks: int = 3) -> None:
+    features = get_feature_extractor(model)
+    if isinstance(features, nn.Sequential):
+        for block in list(features.children())[-n_blocks:]:
+            for p in block.parameters():
+                p.requires_grad = True
+        return
+    for p in features.parameters():
+        p.requires_grad = True
 
 # ---------------------------------------------------------------------------
 # Main training script
 # ---------------------------------------------------------------------------
 def parse_args():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    parser = argparse.ArgumentParser(description="TB Detection – EfficientNet/DenseNet + U-Net + enhancement")
+    parser = argparse.ArgumentParser(description="TB Detection – EfficientNet/DenseNet/ConvNeXt + U-Net + enhancement")
     # Directories
     parser.add_argument("--data-dir", type=str, default=os.path.join(base_dir, "..", "data_prepared_mixed"))
     parser.add_argument("--external-dir", type=str, default=os.path.join(base_dir, "..", "data2"))
@@ -856,7 +885,7 @@ def parse_args():
     parser.add_argument("--enable-external-eval", action="store_true")
     # Backbone selection  <-- NUEVO
     parser.add_argument("--backbone", type=str, default="efficientnet_b4",
-                        choices=["efficientnet_b4", "densenet169"],
+                        choices=["efficientnet_b4", "densenet169", "convnext_tiny"],
                         help="Red troncal del modelo.")
     # Score-CAM
     parser.add_argument("--make-cam-grid", action="store_true")
@@ -998,9 +1027,9 @@ def main():
     # Move model to device
     model = model.to(device)
     # Freeze feature extractor initially
-    for p in model.features.parameters():
+    for p in get_feature_extractor(model).parameters():
         p.requires_grad = False
-    for p in model.classifier.parameters():
+    for p in get_classifier_head(model).parameters():
         p.requires_grad = True
 
     criterion = nn.CrossEntropyLoss()
@@ -1019,8 +1048,7 @@ def main():
     # Training loop
     for epoch in range(1, args.epochs + 1):
         if epoch == head_epochs + 1:
-            for p in model.features[-3:].parameters():
-                p.requires_grad = True
+            unfreeze_last_feature_blocks(model, n_blocks=3)
             optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad],
                                     lr=args.lr_finetune, weight_decay=args.weight_decay)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2)

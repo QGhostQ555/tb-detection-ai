@@ -1,369 +1,222 @@
 import argparse
-import json
-import os
+import hashlib
 import random
+import shutil
+import stat
+from pathlib import Path
 from typing import Dict, List, Tuple
 
-import cv2
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, random_split
-
-from train import AttentionLungUNet, LungUNet, select_device, set_seed
+VALID_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+CLASS_NAMES = ["NORMAL", "TB"]
 
 
-def _is_image_file(name: str) -> bool:
-    return name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"))
-
-
-def list_segmentation_pairs(segmentation_dir: str) -> List[Tuple[str, str]]:
-    cxr_dir = os.path.join(segmentation_dir, "CXR_png")
-    if not os.path.isdir(cxr_dir):
-        raise FileNotFoundError(f"No existe: {cxr_dir}")
-    mask_dir = ""
-    for candidate in ("mask", "masks", "Mask", "Masks"):
-        path = os.path.join(segmentation_dir, candidate)
-        if os.path.isdir(path):
-            mask_dir = path
-            break
-    if not mask_dir:
-        raise FileNotFoundError(
-            f"No existe carpeta de mascaras en {segmentation_dir} (se esperaba mask o masks)."
-        )
-
-    mask_by_stem: Dict[str, str] = {}
-    for name in os.listdir(mask_dir):
-        if not _is_image_file(name):
-            continue
-        mask_by_stem[os.path.splitext(name)[0].lower()] = os.path.join(mask_dir, name)
-
-    pairs: List[Tuple[str, str]] = []
-    for name in sorted(os.listdir(cxr_dir)):
-        if not _is_image_file(name):
-            continue
-        img_path = os.path.join(cxr_dir, name)
-        stem = os.path.splitext(name)[0].lower()
-        candidates = [
-            stem,
-            f"{stem}_mask",
-            f"{stem}-mask",
-            f"mask_{stem}",
-        ]
-        mask_path = next((mask_by_stem[key] for key in candidates if key in mask_by_stem), None)
-        if mask_path is not None:
-            pairs.append((img_path, mask_path))
-    if not pairs:
-        raise RuntimeError("No se encontraron pares CXR + mascara en segmentacion/mask.")
-    return pairs
-
-
-class LungMaskDataset(Dataset):
-    def __init__(
-        self,
-        pairs: List[Tuple[str, str]],
-        img_size: int,
-        augment: bool,
-        clahe_clip_limit: float = 2.0,
-        gamma: float = 1.1,
-    ):
-        self.pairs = pairs
-        self.img_size = img_size
-        self.augment = augment
-        self.clahe = cv2.createCLAHE(
-            clipLimit=max(0.1, float(clahe_clip_limit)),
-            tileGridSize=(8, 8),
-        )
-        self.gamma = max(0.1, float(gamma))
-        inv = 1.0 / self.gamma
-        self.gamma_lut = np.array(
-            [(i / 255.0) ** inv * 255.0 for i in range(256)],
-            dtype=np.uint8,
-        )
-
-    def __len__(self) -> int:
-        return len(self.pairs)
-
-    def __getitem__(self, idx: int):
-        img_path, mask_path = self.pairs[idx]
-        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if img is None or mask is None:
-            raise FileNotFoundError(f"No se pudo leer par de segmentacion: {img_path}")
-
-        # Cierra huecos pequenos en mascara binaria final.
-        mask = (mask > 0).astype(np.uint8) * 255
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
-        img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_AREA)
-        mask = cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
-
-        # CLAHE + gamma before augmentation to stabilize contrast across studies.
-        img = self.clahe.apply(img)
-        img = cv2.LUT(img, self.gamma_lut)
-
-        if self.augment:
-            if random.random() < 0.5:
-                img = cv2.flip(img, 1)
-                mask = cv2.flip(mask, 1)
-            angle = random.uniform(-8.0, 8.0)
-            scale = random.uniform(0.95, 1.05)
-            tx = random.uniform(-0.03, 0.03) * self.img_size
-            ty = random.uniform(-0.03, 0.03) * self.img_size
-            center = (self.img_size / 2.0, self.img_size / 2.0)
-            mat = cv2.getRotationMatrix2D(center, angle, scale)
-            mat[0, 2] += tx
-            mat[1, 2] += ty
-            img = cv2.warpAffine(
-                img, mat, (self.img_size, self.img_size),
-                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101,
-            )
-            mask = cv2.warpAffine(
-                mask, mat, (self.img_size, self.img_size),
-                flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
-            )
-            if random.random() < 0.30:
-                alpha = random.uniform(0.90, 1.12)
-                beta = random.uniform(-10.0, 10.0)
-                img = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
-
-        img = img.astype(np.float32) / 255.0
-        mask = (mask > 0).astype(np.float32)
-        return (
-            torch.from_numpy(img).unsqueeze(0),
-            torch.from_numpy(mask).unsqueeze(0),
-        )
-
-
-class DiceBCELoss(nn.Module):
-    def __init__(self, bce_weight: float = 0.5):
-        super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
-        self.bce_weight = float(np.clip(bce_weight, 0.0, 1.0))
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        bce = self.bce(logits, targets)
-        probs = torch.sigmoid(logits)
-        dims = (1, 2, 3)
-        inter = torch.sum(probs * targets, dims)
-        denom = torch.sum(probs + targets, dims)
-        dice = 1.0 - torch.mean((2.0 * inter + 1.0) / (denom + 1.0))
-        return self.bce_weight * bce + (1.0 - self.bce_weight) * dice
-
-
-def mask_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: float) -> Dict[str, float]:
-    preds = (torch.sigmoid(logits) >= threshold).float()
-    targets = (targets >= 0.5).float()
-    dims = (1, 2, 3)
-    inter = torch.sum(preds * targets, dims)
-    pred_sum = torch.sum(preds, dims)
-    target_sum = torch.sum(targets, dims)
-    union = pred_sum + target_sum - inter
-    dice = torch.mean((2.0 * inter + 1.0) / (pred_sum + target_sum + 1.0))
-    iou = torch.mean((inter + 1.0) / (union + 1.0))
-    return {"dice": float(dice.item()), "iou": float(iou.item())}
-
-
-def evaluate(model, loader, device, criterion, threshold: float) -> Dict[str, float]:
-    model.eval()
-    total_loss = 0.0
-    dices, ious = [], []
-    with torch.no_grad():
-        for images, masks in loader:
-            images = images.to(device)
-            masks = masks.to(device)
-            logits = model(images)
-            total_loss += criterion(logits, masks).item()
-            m = mask_metrics(logits, masks, threshold)
-            dices.append(m["dice"])
-            ious.append(m["iou"])
-    return {
-        "loss": total_loss / max(1, len(loader)),
-        "dice": float(np.mean(dices)) if dices else 0.0,
-        "iou": float(np.mean(ious)) if ious else 0.0,
-    }
-
-
-def find_best_threshold(model, loader, device, thresholds: np.ndarray) -> float:
-    model.eval()
-    all_probs: List[np.ndarray] = []
-    all_targets: List[np.ndarray] = []
-    with torch.no_grad():
-        for images, masks in loader:
-            images = images.to(device)
-            probs = torch.sigmoid(model(images)).cpu().numpy()
-            all_probs.append(probs)
-            all_targets.append(masks.numpy())
-    if not all_probs:
-        return 0.50
-    probs = np.concatenate(all_probs, axis=0)
-    targets = (np.concatenate(all_targets, axis=0) >= 0.5).astype(np.float32)
-    best_thr = 0.50
-    best_dice = -1.0
-    for thr in thresholds:
-        preds = (probs >= thr).astype(np.float32)
-        inter = np.sum(preds * targets, axis=(1, 2, 3))
-        denom = np.sum(preds + targets, axis=(1, 2, 3))
-        dice = np.mean((2.0 * inter + 1.0) / (denom + 1.0))
-        if float(dice) > best_dice:
-            best_dice = float(dice)
-            best_thr = float(thr)
-    return best_thr
-
-
-def parse_args() -> argparse.Namespace:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    default_segmentation_dir = os.path.abspath(os.path.join(base_dir, "..", "segmentacion"))
-    default_model_dir = os.path.abspath(os.path.join(base_dir, "..", "models"))
-    parser = argparse.ArgumentParser(description="Entrena U-Net pulmonar con CXR_png + mask (mascara bilateral).")
-    parser.add_argument("--segmentation-dir", type=str, default=default_segmentation_dir)
-    parser.add_argument("--model-dir", type=str, default=default_model_dir)
-    parser.add_argument("--output-name", type=str, default="lung_attention_unet_best.pt")
-    parser.add_argument("--architecture", type=str, default="attention_unet",
-                        choices=["attention_unet", "unet"])
-    parser.add_argument("--img-size", type=int, default=320)
-    parser.add_argument("--base-channels", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--val-ratio", type=float, default=0.20)
-    parser.add_argument("--threshold", type=float, default=0.50)
-    parser.add_argument("--patience", type=int, default=8)
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--clahe-clip-limit", type=float, default=2.0)
-    parser.add_argument("--gamma", type=float, default=1.1)
-    parser.add_argument("--auto-threshold", action="store_true",
-                        help="Buscar umbral de mascara optimo en validacion por Dice.")
-    parser.add_argument("--min-threshold", type=float, default=0.35)
-    parser.add_argument("--max-threshold", type=float, default=0.70)
-    parser.add_argument("--threshold-steps", type=int, default=15)
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Divide imágenes en train/val/test de forma balanceada por clase y opcionalmente por subcarpeta (dominio)."
+    )
+    parser.add_argument("--input-dir", type=Path, required=True,
+                        help="Directorio raíz que contiene las carpetas NORMAL/ y TB/ (y dentro opcionalmente subcarpetas de dominio)")
+    parser.add_argument("--output-dir", type=Path, required=True,
+                        help="Directorio destino donde se crearán train/val/test con las mismas subcarpetas de clase")
+    parser.add_argument("--train-ratio", type=float, default=0.7,
+                        help="Proporción para entrenamiento (0-1)")
+    parser.add_argument("--val-ratio", type=float, default=0.15,
+                        help="Proporción para validación (0-1)")
+    parser.add_argument("--test-ratio", type=float, default=0.15,
+                        help="Proporción para prueba (0-1)")
+    parser.add_argument("--balance-domains", action="store_true",
+                        help="Si está activo, dentro de cada clase se intenta que cada subcarpeta (dominio) aporte la misma cantidad de muestras a cada split")
+    parser.add_argument("--target-per-class", type=int, default=0,
+                        help="Número fijo de muestras por clase (0 = usar todas disponibles)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Semilla aleatoria")
+    parser.add_argument("--clean", action="store_true",
+                        help="Elimina output-dir antes de copiar")
     return parser.parse_args()
 
 
-def main() -> None:
+def collect_samples(class_dir: Path, class_name: str) -> List[Tuple[Path, str]]:
+    """
+    Recorre class_dir y devuelve lista de (ruta_imagen, subcarpeta_relativa).
+    La subcarpeta se usa como dominio (si hay subcarpetas internas, se toma la primera relativa).
+    Ejemplo: class_dir/NORMAL/ -> dentro puede haber d1/ y d2/; devuelve (path, 'd1').
+    Si no hay subcarpetas, dominio = ''.
+    """
+    samples = []
+    for item in class_dir.iterdir():
+        if item.is_dir():
+            # subcarpeta = dominio
+            domain = item.name
+            for img in item.rglob("*"):
+                if img.suffix.lower() in VALID_EXT:
+                    samples.append((img, domain))
+        elif item.is_file() and item.suffix.lower() in VALID_EXT:
+            # archivos directamente en class_dir
+            samples.append((item, "default"))
+    return samples
+
+
+def split_stratified_by_domain(samples_by_domain: Dict[str, List[Path]],
+                               train_ratio, val_ratio, test_ratio, seed):
+    """
+    Dado un diccionario {dominio: lista de rutas}, divide cada dominio independientemente
+    en train/val/test, luego concatena.
+    Retorna dict con splits.
+    """
+    random.seed(seed)
+    splits = {"train": [], "val": [], "test": []}
+    for domain, paths in samples_by_domain.items():
+        random.shuffle(paths)
+        n = len(paths)
+        n_train = int(round(train_ratio * n))
+        n_val = int(round(val_ratio * n))
+        # Ajuste por redondeo
+        if n_train + n_val > n:
+            n_train = n - n_val
+        elif n_train + n_val < n:
+            n_val = n - n_train
+        n_test = n - n_train - n_val
+        splits["train"].extend(paths[:n_train])
+        splits["val"].extend(paths[n_train:n_train+n_val])
+        splits["test"].extend(paths[n_train+n_val:])
+    # Mezclar globalmente
+    for k in splits:
+        random.shuffle(splits[k])
+    return splits
+
+
+def select_balanced_by_domain(all_samples: List[Tuple[Path, str]], target_count: int, seed: int):
+    """
+    Selecciona target_count muestras balanceando la cantidad por dominio.
+    Si balance_domains está activo, se asegura que cada dominio contribuya proporcionalmente.
+    """
+    if target_count <= 0 or target_count >= len(all_samples):
+        return all_samples
+    # Agrupar por dominio
+    by_domain: Dict[str, List[Path]] = {}
+    for path, domain in all_samples:
+        by_domain.setdefault(domain, []).append(path)
+    # Calcular cuántas por dominio (aproximadamente igual)
+    num_domains = len(by_domain)
+    base = target_count // num_domains
+    remainder = target_count % num_domains
+    selected = []
+    for i, (domain, paths) in enumerate(sorted(by_domain.items())):
+        quota = base + (1 if i < remainder else 0)
+        # Si no hay suficientes en ese dominio, tomar todas y ajustar después
+        take = min(quota, len(paths))
+        selected.extend(random.Random(seed + i).sample(paths, take))
+    # Si faltan muestras (porque algún dominio tenía menos), completar con cualquier dominio
+    if len(selected) < target_count:
+        remaining = [p for p in all_samples if p[0] not in selected]
+        extra = random.Random(seed).sample(remaining, target_count - len(selected))
+        selected.extend([p[0] for p in extra])
+    return selected
+
+
+def main():
     args = parse_args()
-    set_seed(args.seed)
-    if not (0.05 <= args.val_ratio <= 0.5):
-        raise ValueError("--val-ratio debe estar entre 0.05 y 0.5")
+    if abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) > 1e-6:
+        raise ValueError("Las proporciones deben sumar 1")
 
-    pairs = list_segmentation_pairs(args.segmentation_dir)
-    generator = torch.Generator().manual_seed(args.seed)
-    val_len = max(1, int(round(len(pairs) * args.val_ratio)))
-    train_len = len(pairs) - val_len
-    train_pairs, val_pairs = random_split(pairs, [train_len, val_len], generator=generator)
+    input_root = args.input_dir
+    output_root = args.output_dir
+    if not input_root.exists():
+        raise FileNotFoundError(f"No existe {input_root}")
 
-    train_ds = LungMaskDataset(
-        list(train_pairs), args.img_size, augment=True,
-        clahe_clip_limit=args.clahe_clip_limit, gamma=args.gamma,
-    )
-    val_ds = LungMaskDataset(
-        list(val_pairs), args.img_size, augment=False,
-        clahe_clip_limit=args.clahe_clip_limit, gamma=args.gamma,
-    )
+    # Verificar que existan las carpetas de clase
+    for cls in CLASS_NAMES:
+        class_dir = input_root / cls
+        if not class_dir.exists():
+            raise FileNotFoundError(f"Falta la carpeta {cls} en {input_root}")
 
-    loader_kwargs = {"num_workers": args.num_workers, "pin_memory": torch.cuda.is_available()}
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **loader_kwargs)
+    if args.clean and output_root.exists():
+        shutil.rmtree(output_root)
 
-    device, device_name = select_device()
-    print(f"Dispositivo: {device_name} ({device})")
-    print(f"Pares segmentacion: train={len(train_ds)}, val={len(val_ds)}")
+    # Recopilar muestras por clase
+    class_samples: Dict[str, List[Tuple[Path, str]]] = {}
+    for cls in CLASS_NAMES:
+        class_dir = input_root / cls
+        samples = collect_samples(class_dir, cls)
+        if not samples:
+            raise ValueError(f"No se encontraron imágenes en {class_dir}")
+        class_samples[cls] = samples
 
-    model_cls = AttentionLungUNet if args.architecture == "attention_unet" else LungUNet
-    model = model_cls(base_channels=args.base_channels).to(device)
-    criterion = DiceBCELoss(bce_weight=0.45)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=3,
-    )
+    # Seleccionar número fijo por clase si se pidió
+    target_per_class = args.target_per_class
+    if target_per_class > 0:
+        for cls in CLASS_NAMES:
+            if len(class_samples[cls]) < target_per_class:
+                print(f"Advertencia: {cls} solo tiene {len(class_samples[cls])} muestras, se usarán todas")
+                continue
+            # Seleccionar balanceando por dominio si se pide
+            class_samples[cls] = select_balanced_by_domain(
+                class_samples[cls], target_per_class, args.seed + hash(cls)
+            )
+            class_samples[cls] = [(p, d) for p, d in class_samples[cls]]
 
-    if args.auto_threshold:
-        if args.threshold_steps < 3:
-            raise ValueError("--threshold-steps debe ser >= 3")
-        if not (0.05 <= args.min_threshold < args.max_threshold <= 0.95):
-            raise ValueError("Rango de threshold invalido.")
-
-    best_dice = -1.0
-    best_state = None
-    best_threshold = float(args.threshold)
-    wait = 0
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        train_loss = 0.0
-        for images, masks in train_loader:
-            images = images.to(device)
-            masks = masks.to(device)
-            optimizer.zero_grad()
-            loss = criterion(model(images), masks)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-        train_loss /= max(1, len(train_loader))
-        eval_threshold = float(args.threshold)
-        if args.auto_threshold:
-            threshold_grid = np.linspace(args.min_threshold, args.max_threshold, args.threshold_steps)
-            eval_threshold = find_best_threshold(model, val_loader, device, threshold_grid)
-        val_metrics = evaluate(model, val_loader, device, criterion, eval_threshold)
-        scheduler.step(val_metrics["dice"])
-        print(
-            f"Epoch {epoch:02d}/{args.epochs} | train_loss={train_loss:.4f} | "
-            f"val_loss={val_metrics['loss']:.4f} | dice={val_metrics['dice']:.4f} | "
-            f"iou={val_metrics['iou']:.4f} | thr={eval_threshold:.3f}"
-        )
-        if val_metrics["dice"] > best_dice:
-            best_dice = val_metrics["dice"]
-            best_threshold = eval_threshold
-            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-            wait = 0
+    # División por clase
+    final_splits = {"train": [], "val": [], "test": []}
+    for cls, samples in class_samples.items():
+        # Agrupar por dominio dentro de esta clase
+        by_domain: Dict[str, List[Path]] = {}
+        for path, domain in samples:
+            by_domain.setdefault(domain, []).append(path)
+        if args.balance_domains:
+            # Dividir estratificando por dominio
+            splits = split_stratified_by_domain(by_domain,
+                                                args.train_ratio, args.val_ratio, args.test_ratio,
+                                                args.seed + hash(cls))
         else:
-            wait += 1
-            if wait >= args.patience:
-                print("Early stopping activado.")
-                break
+            # Mezclar todas las rutas y dividir proporcionalmente
+            all_paths = [p for p, _ in samples]
+            random.Random(args.seed + hash(cls)).shuffle(all_paths)
+            n = len(all_paths)
+            n_train = int(round(args.train_ratio * n))
+            n_val = int(round(args.val_ratio * n))
+            if n_train + n_val > n:
+                n_train = n - n_val
+            elif n_train + n_val < n:
+                n_val = n - n_train
+            n_test = n - n_train - n_val
+            splits = {
+                "train": all_paths[:n_train],
+                "val": all_paths[n_train:n_train+n_val],
+                "test": all_paths[n_train+n_val:]
+            }
+        # Almacenar junto con la clase
+        for split_name, paths in splits.items():
+            final_splits[split_name].extend((cls, p) for p in paths)
 
-    if best_state is None:
-        raise RuntimeError("No se obtuvo un checkpoint valido de U-Net.")
+    # Copiar archivos a la estructura de salida
+    for split_name in ["train", "val", "test"]:
+        split_dir = output_root / split_name
+        for cls in CLASS_NAMES:
+            (split_dir / cls).mkdir(parents=True, exist_ok=True)
+        for cls, path in final_splits[split_name]:
+            dst = split_dir / cls / path.name
+            # Evitar colisiones con nombres duplicados
+            if dst.exists():
+                new_name = f"{path.stem}_{hashlib.md5(str(path).encode()).hexdigest()[:8]}{path.suffix}"
+                dst = split_dir / cls / new_name
+            shutil.copy2(path, dst)
 
-    os.makedirs(args.model_dir, exist_ok=True)
-    model_path = os.path.join(args.model_dir, args.output_name)
-    torch.save(
-        {
-            "model_state_dict": best_state,
-            "architecture": args.architecture,
-            "img_size": args.img_size,
-            "threshold": float(best_threshold),
-            "base_channels": args.base_channels,
-            "segmentation_dir": args.segmentation_dir,
-            "clahe_clip_limit": args.clahe_clip_limit,
-            "gamma": args.gamma,
-        },
-        model_path,
-    )
-    metrics_path = os.path.join(
-        args.model_dir, os.path.splitext(args.output_name)[0] + "_metrics.json"
-    )
-    with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "best_val_dice": best_dice,
-                "architecture": args.architecture,
-                "img_size": args.img_size,
-                "threshold": float(best_threshold),
-                "threshold_auto": bool(args.auto_threshold),
-                "train_samples": len(train_ds),
-                "val_samples": len(val_ds),
-                "segmentation_dir": args.segmentation_dir,
-                "clahe_clip_limit": args.clahe_clip_limit,
-                "gamma": args.gamma,
-            },
-            f,
-            indent=2,
-            ensure_ascii=False,
-        )
-    print(f"\nU-Net guardado en: {model_path}")
-    print(f"Metricas guardadas en: {metrics_path}")
+    # Mostrar estadísticas finales
+    print(f"\nDivisión completada en: {output_root}")
+    for split in ["train", "val", "test"]:
+        split_dir = output_root / split
+        stats = {}
+        for cls in CLASS_NAMES:
+            count = len(list((split_dir / cls).glob("*")))
+            stats[cls] = count
+        total = sum(stats.values())
+        print(f"{split}: NORMAL={stats['NORMAL']}, TB={stats['TB']}, total={total}")
+
+    print("\nOpciones usadas:")
+    print(f"  - Balancear dominios: {args.balance_domains}")
+    print(f"  - Muestras por clase: {args.target_per_class if args.target_per_class>0 else 'todas'}")
+    print(f"  - Proporciones: train={args.train_ratio}, val={args.val_ratio}, test={args.test_ratio}")
+    print(f"  - Semilla: {args.seed}")
 
 
 if __name__ == "__main__":
